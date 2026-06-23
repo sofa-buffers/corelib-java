@@ -39,7 +39,7 @@ jobs:
         run: mvn -B verify
 
   coverage-badge:
-    name: Coverage badge
+    name: Coverage
     runs-on: ubuntu-latest
     needs: build-test
     # Only refresh the badge for the canonical branch, never for PR forks.
