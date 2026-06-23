@@ -34,16 +34,50 @@ jobs:
           cache: maven
 
       # `verify` runs the JUnit suite and produces the JaCoCo coverage report
-      # at target/site/jacoco/jacoco.xml.
+      # at target/site/jacoco/jacoco.{xml,csv}.
       - name: Build & test (with coverage)
         run: mvn -B verify
 
-      # Upload coverage to Coveralls, which renders the dynamic badge in the
-      # README. For public repos the default GITHUB_TOKEN is sufficient. Only
-      # the LTS matrix leg uploads, to avoid duplicate parallel reports.
-      - name: Upload coverage to Coveralls
-        if: matrix.java == '21'
-        uses: coverallsapp/github-action@v2
+  coverage-badge:
+    name: Coverage badge
+    runs-on: ubuntu-latest
+    needs: build-test
+    # Only refresh the badge for the canonical branch, never for PR forks.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
         with:
-          file: target/site/jacoco/jacoco.xml
-          format: jacoco
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build & test (with coverage)
+        run: mvn -B verify
+
+      # Render coverage (instruction) and branch SVG badges from the JaCoCo CSV.
+      - name: Generate JaCoCo badges
+        uses: cicirello/jacoco-badge-generator@v2
+        with:
+          jacoco-csv-file: target/site/jacoco/jacoco.csv
+          badges-directory: .badges
+          generate-coverage-badge: true
+          generate-branches-badge: true
+
+      # Force-push the freshly rendered SVGs to the orphan `badges` branch. The
+      # README references them by raw URL, so the badge shows the new % after
+      # every CI run on main. The default GITHUB_TOKEN has enough scope.
+      - name: Publish badges to the badges branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./.badges
+          publish_branch: badges
+          keep_files: false
+          commit_message: 'Update coverage badges for ${{ github.sha }}'
+          user_name: 'github-actions[bot]'
+          user_email: 'github-actions[bot]@users.noreply.github.com'
