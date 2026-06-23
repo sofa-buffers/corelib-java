@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & test (JDK ${{ matrix.java }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Minimum supported release (pom maven.compiler.release) plus current LTS.
+        java: ['17', '21']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+
+      # `verify` runs the JUnit suite and produces the JaCoCo coverage report
+      # at target/site/jacoco/jacoco.xml.
+      - name: Build & test (with coverage)
+        run: mvn -B verify
+
+      # Upload coverage to Coveralls, which renders the dynamic badge in the
+      # README. For public repos the default GITHUB_TOKEN is sufficient. Only
+      # the LTS matrix leg uploads, to avoid duplicate parallel reports.
+      - name: Upload coverage to Coveralls
+        if: matrix.java == '21'
+        uses: coverallsapp/github-action@v2
+        with:
+          file: target/site/jacoco/jacoco.xml
+          format: jacoco

@@ -9,6 +9,9 @@
 
 ## SofaBuffers Java library
 
+[![CI](https://github.com/sofa-buffers/corelib-java/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sofa-buffers/corelib-java/actions/workflows/ci.yml)
+[![Coverage Status](https://coveralls.io/repos/github/sofa-buffers/corelib-java/badge.svg?branch=main)](https://coveralls.io/github/sofa-buffers/corelib-java?branch=main)
+
 [GitHub repository](https://github.com/sofa-buffers/corelib-java)
 
 A **dependency-free**, **allocation-light**, **streaming** Java implementation of

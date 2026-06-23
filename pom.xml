@@ -48,6 +48,33 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.2.5</version>
       </plugin>
+      <!-- Code coverage: produces target/site/jacoco/jacoco.xml during `mvn verify`. -->
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>0.8.12</version>
+        <configuration>
+          <!-- Benchmark tools are runnable mains, not unit-tested library code. -->
+          <excludes>
+            <exclude>org/sofabuffers/sofab/bench/**</exclude>
+          </excludes>
+        </configuration>
+        <executions>
+          <execution>
+            <id>prepare-agent</id>
+            <goals>
+              <goal>prepare-agent</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>report</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
       <!--
         Run the benchmark tools, e.g.:
           mvn -q compile exec:java -Dexec.mainClass=org.sofabuffers.sofab.bench.Perf
