@@ -59,14 +59,18 @@ jobs:
       - name: Build & test (with coverage)
         run: mvn -B verify
 
-      # Render coverage (instruction) and branch SVG badges from the JaCoCo CSV.
-      - name: Generate JaCoCo badges
+      # Emit shields.io endpoint JSON (coverage.json / branches.json) from the
+      # JaCoCo CSV. The README renders these through img.shields.io, so the
+      # badge styling comes from shields while the value stays dynamic.
+      - name: Generate JaCoCo shields endpoints
         uses: cicirello/jacoco-badge-generator@v2
         with:
           jacoco-csv-file: target/site/jacoco/jacoco.csv
           badges-directory: .badges
-          generate-coverage-badge: true
-          generate-branches-badge: true
+          generate-coverage-badge: false
+          generate-branches-badge: false
+          generate-coverage-endpoint: true
+          generate-branches-endpoint: true
 
       # Force-push the freshly rendered SVGs to the orphan `badges` branch. The
       # README references them by raw URL, so the badge shows the new % after

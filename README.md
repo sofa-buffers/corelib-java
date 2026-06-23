@@ -10,8 +10,8 @@
 ## SofaBuffers Java library
 
 [![CI](https://github.com/sofa-buffers/corelib-java/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sofa-buffers/corelib-java/actions/workflows/ci.yml)
-[![Coverage](https://raw.githubusercontent.com/sofa-buffers/corelib-java/badges/jacoco.svg)](https://github.com/sofa-buffers/corelib-java/actions/workflows/ci.yml)
-[![Branches](https://raw.githubusercontent.com/sofa-buffers/corelib-java/badges/branches.svg)](https://github.com/sofa-buffers/corelib-java/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsofa-buffers%2Fcorelib-java%2Fbadges%2Fcoverage.json)](https://github.com/sofa-buffers/corelib-java/actions/workflows/ci.yml)
+[![Branches](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsofa-buffers%2Fcorelib-java%2Fbadges%2Fbranches.json)](https://github.com/sofa-buffers/corelib-java/actions/workflows/ci.yml)
 
 [GitHub repository](https://github.com/sofa-buffers/corelib-java)
 
