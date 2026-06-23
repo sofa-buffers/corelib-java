@@ -71,6 +71,9 @@ jobs:
           generate-branches-badge: false
           generate-coverage-endpoint: true
           generate-branches-endpoint: true
+          # Default coverage endpoint filename is jacoco.json; the README
+          # references coverage.json, so override it to match.
+          coverage-endpoint-filename: coverage.json
 
       # Force-push the freshly rendered SVGs to the orphan `badges` branch. The
       # README references them by raw URL, so the badge shows the new % after
