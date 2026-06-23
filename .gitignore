@@ -1,0 +1,6 @@
+# Local secrets — never commit these.
+.env
+.devcontainer/.env
+
+# Maven build output
+target/
