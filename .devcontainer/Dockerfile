@@ -22,7 +22,7 @@ RUN curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public \
     && apt-get install -y --no-install-recommends temurin-${JAVA_VERSION}-jdk maven gradle \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js (LTS) für Claude Code
+# Node.js (LTS) for Claude Code
 RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
