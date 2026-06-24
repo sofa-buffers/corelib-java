@@ -75,6 +75,21 @@
           </execution>
         </executions>
       </plugin>
+      <!-- API documentation: `mvn javadoc:javadoc` -> target/reports/apidocs. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>3.11.2</version>
+        <configuration>
+          <source>${maven.compiler.release}</source>
+          <doctitle>SofaBuffers Java ${project.version}</doctitle>
+          <windowtitle>SofaBuffers Java ${project.version}</windowtitle>
+          <quiet>true</quiet>
+          <notimestamp>true</notimestamp>
+          <!-- Benchmark tools are runnable mains, not part of the public API. -->
+          <excludePackageNames>org.sofabuffers.sofab.bench</excludePackageNames>
+        </configuration>
+      </plugin>
       <!--
         Run the benchmark tools, e.g.:
           mvn -q compile exec:java -Dexec.mainClass=org.sofabuffers.sofab.bench.Perf
