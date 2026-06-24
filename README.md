@@ -16,10 +16,6 @@
 
 [GitHub repository](https://github.com/sofa-buffers/corelib-java)
 
-### Source documentation
-
-[Documentation](https://sofa-buffers.github.io/corelib-java/)
-
 A **dependency-free**, **allocation-light**, **streaming** Java implementation of
 the SofaBuffers (*Sofab*) serialization format. It is the **runtime stream core**
 (equivalent to the C `corelib`'s `istream` / `ostream`), a port of the C
@@ -53,6 +49,11 @@ Requires JDK 17+.
 | Reserve-offset | `new OStream(buf, offset)` leaves room at the front of the buffer for a lower-layer protocol header (saves a copy). |
 | Explicit endianness | IEEE-754 values are written / read little-endian with explicit bit shifts, so behaviour is identical on every JVM. |
 | Generated-code friendly | A `Visitor` has a default no-op for every field kind, so generated (and hand-written) sinks override only what they need and ignore the rest. |
+
+## Source documentation
+
+[Documentation](https://sofa-buffers.github.io/corelib-java/) — Javadoc HTML for
+the package, generated and published to GitHub Pages on every push to `main`.
 
 ## Usage
 
