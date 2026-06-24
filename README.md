@@ -16,6 +16,10 @@
 
 [GitHub repository](https://github.com/sofa-buffers/corelib-java)
 
+### Source documentation
+
+[Documentation](https://sofa-buffers.github.io/corelib-java/)
+
 A **dependency-free**, **allocation-light**, **streaming** Java implementation of
 the SofaBuffers (*Sofab*) serialization format. It is the **runtime stream core**
 (equivalent to the C `corelib`'s `istream` / `ostream`), a port of the C
