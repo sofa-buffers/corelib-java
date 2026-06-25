@@ -21,6 +21,8 @@
  *       caller buffer, with an optional {@link org.sofabuffers.sofab.FlushSink}.</li>
  *   <li>{@link org.sofabuffers.sofab.IStream} — streaming decoder pushing fields
  *       to a {@link org.sofabuffers.sofab.Visitor} (visitor pattern).</li>
+ *   <li>{@link org.sofabuffers.sofab.Sofab} — library constants, including
+ *       {@link org.sofabuffers.sofab.Sofab#API_VERSION}.</li>
  * </ul>
  *
  * <p>The wire format is specified, language-neutrally, in the

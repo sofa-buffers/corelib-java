@@ -24,6 +24,7 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>17</maven.compiler.release>
     <junit.version>5.10.2</junit.version>
+    <gson.version>2.11.0</gson.version>
   </properties>
 
   <dependencies>
@@ -33,10 +34,32 @@
       <version>${junit.version}</version>
       <scope>test</scope>
     </dependency>
+    <!-- Test-only: parse the shared assets/test_vectors.json conformance suite.
+         Gson preserves exact precision for unsigned u64 values via getAsBigInteger().
+         The runtime library stays dependency-free. -->
+    <dependency>
+      <groupId>com.google.code.gson</groupId>
+      <artifactId>gson</artifactId>
+      <version>${gson.version}</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
     <finalName>sofab</finalName>
+    <!-- Put the shared conformance vectors on the test classpath straight from
+         assets/ (single source of truth, copied verbatim from the documentation repo). -->
+    <testResources>
+      <testResource>
+        <directory>src/test/resources</directory>
+      </testResource>
+      <testResource>
+        <directory>assets</directory>
+        <includes>
+          <include>test_vectors.json</include>
+        </includes>
+      </testResource>
+    </testResources>
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>

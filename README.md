@@ -30,10 +30,10 @@ typically a single `switch` over the field id.
 
 The wire format is specified, language-neutrally, in the
 [SofaBuffers documentation](https://github.com/sofa-buffers/documentation). The
-unit tests here use the exact byte vectors from the
-[C corelib](https://github.com/sofa-buffers/corelib-c-cpp)'s reference suite
-(`test/c/test_ostream.c`) to guarantee byte-for-byte interoperability with the C,
-C++, Rust and Go implementations.
+unit tests replay the shared, language-agnostic conformance suite
+(`assets/test_vectors.json`, copied verbatim from the documentation repo) for both
+encode and decode, guaranteeing byte-for-byte interoperability with the C, C++,
+Rust and Go implementations.
 
 Maven coordinates: `org.sofabuffers:sofab` · package `org.sofabuffers.sofab`.
 Requires JDK 17+.
@@ -49,11 +49,6 @@ Requires JDK 17+.
 | Reserve-offset | `new OStream(buf, offset)` leaves room at the front of the buffer for a lower-layer protocol header (saves a copy). |
 | Explicit endianness | IEEE-754 values are written / read little-endian with explicit bit shifts, so behaviour is identical on every JVM. |
 | Generated-code friendly | A `Visitor` has a default no-op for every field kind, so generated (and hand-written) sinks override only what they need and ignore the rest. |
-
-## Source documentation
-
-[Documentation](https://sofa-buffers.github.io/corelib-java/) — Javadoc HTML for
-the package, generated and published to GitHub Pages on every push to `main`.
 
 ## Usage
 
@@ -115,35 +110,82 @@ new IStream().feed(buf, 0, used, new Visitor() {
 });
 ```
 
-## Format coverage
+## API summary
 
-The Java build always includes the full format — unsigned / signed varints,
-`fp32` / `fp64`, strings, blobs, arrays and nested sequences — because the
-desktop and cloud targets it is built for are not code-size constrained. The C
-library's compile-time `SOFAB_DISABLE_*` switches (which strip whole code paths
-for tiny microcontrollers) therefore have no Java equivalent. The value type is
-64-bit (`long` / unsigned `long`), matching the C default configuration so the
-wire image and varint lengths are identical.
+**Constants** — `Sofab.API_VERSION` (`1`), `Sofab.ID_MAX`, `Sofab.ARRAY_MAX`.
+
+**Encoder — `OStream`**
+
+- `writeUnsigned(id, long)`, `writeSigned(id, long)`, `writeBoolean(id, boolean)`
+- `writeFp32(id, float)`, `writeFp64(id, double)`, `writeString(id, String)`, `writeBlob(id, byte[])`, `writeFixlen(id, byte[], from, len, FixlenType)`
+- `writeArrayUnsigned` / `writeArraySigned` — overloads for `byte[]` / `short[]` / `int[]` / `long[]`; `writeArrayFp32(float[])`, `writeArrayFp64(double[])`
+- `writeSequenceBegin(id)`, `writeSequenceEnd()`
+- `bytesUsed()`, `flush()`, `bufferSet(byte[], offset)` — drive streaming output through a `FlushSink`
+
+**Decoder — `IStream` + `Visitor`**
+
+- `feed(byte[] data, Visitor)` / `feed(byte[] data, off, len, Visitor)` — accepts arbitrarily small chunks
+- `Visitor` callbacks (all default no-ops, so a handler reads only what it cares about and skips the rest): `unsigned`, `signed`, `fp32`, `fp64`, `string`, `blob` (string / blob delivered in chunks), `arrayBegin`, `sequenceBegin`, `sequenceEnd`
+
+## Feature flags
+
+Unlike the C library's compile-time `SOFAB_DISABLE_*` switches (which strip whole
+code paths for tiny microcontrollers), the Java build always ships the **full**
+format — there are no build toggles, because the desktop and cloud targets it is
+built for are not code-size constrained.
+
+| Feature | State |
+|---------|-------|
+| `fixlen` (fp32 / fp64, string, blob) | always on |
+| `array` (unsigned / signed / fixlen arrays) | always on |
+| `sequence` (nested scopes) | always on |
+| `fp64` | always on |
+
+The scalar value type is 64-bit (`long` / unsigned `long`), matching the C default
+configuration, so the wire image and varint lengths are identical across ports.
+
+## Build & test
+
+```bash
+mvn -B verify          # compile, run the JUnit suite, and produce JaCoCo coverage
+mvn -B test            # tests only
+```
+
+`verify` runs every suite — including the shared conformance vectors — and writes a
+JaCoCo report to `target/site/jacoco/` (coverage is gated in CI and surfaced by the
+coverage badge above). Test suites in `src/test/java/org/sofabuffers/sofab/`:
+
+- `VectorConformanceTest.java` — replays the shared `assets/test_vectors.json` suite for encode + decode (one dynamic test per vector)
+- `OStreamTest.java` / `IStreamTest.java` — byte-exact encoder / decoder checks, malformed input, byte-at-a-time feeding
+- `RoundTripTest.java` — encode → decode value preservation
+- `ApiTest.java` — offset reserve, flush-sink streaming larger than the buffer, chunked decode
+- `SkipTest.java` — skipping fields and whole sub-sequences with correct resync
+- `EncoderOverloadsTest.java` / `DecoderErrorsTest.java` / `StreamingEdgeTest.java` / `VisitorDefaultsTest.java` — overloads, error paths, edge cases
+- `common/RecordingVisitor.java` — shared recording `Visitor`
+
+## Benchmarks
+
+Two tools mirror the C / C++ / Rust / Go `perf` and `bench` tooling — same
+workloads (a 1000-element `u64` array and a "typical" mixed message) and the same
+output format — so results are comparable across languages:
+
+```bash
+mvn -q compile exec:java -Dexec.mainClass=org.sofabuffers.sofab.bench.Perf   # per-op cost
+mvn -q compile exec:java -Dexec.mainClass=org.sofabuffers.sofab.bench.Bench  # throughput (MB/s)
+```
+
+- **`Perf`** reports per-operation cost. The JVM exposes no portable hardware cycle
+  counter, so — unlike the C / Rust tools on x86 / AArch64 — `Perf` reports
+  thread-CPU-time ns/op (the machine-independent signal it can measure) and notes
+  that cycles/op is unavailable.
+- **`Bench`** reports encode / decode throughput in MB/s (MB = 1e6 bytes) over a
+  ~1 s CPU-time loop.
 
 ## Layering vs. the C library
 
 | C file | Java type | Status |
 |--------|-----------|--------|
-| `sofab.h` (types / constants) | `SofabError`, `FixlenType`, `ArrayKind`, `WireFormat` | ported |
+| `sofab.h` (types / constants) | `Sofab`, `SofabError`, `FixlenType`, `ArrayKind`, `WireFormat` | ported |
 | `ostream.c` | `OStream` (+ `FlushSink`) | ported |
 | `istream.c` | `IStream` + `Visitor` | ported (push / visitor model instead of bind-target callbacks) |
 | `object.c` (descriptor transcoder) | — | not ported. The idiomatic Java equivalent is generated message classes — a schema-driven generator emitting `Visitor` / encode glue; the streaming core above already covers serialize / deserialize. |
-
-## Testing
-
-```bash
-mvn test
-```
-
-Tests live in `src/test/java/org/sofabuffers/sofab/` as focused suites:
-
-- `OStreamTest.java` — encoder, byte-exact vs. the C reference vectors
-- `IStreamTest.java` — decoder over the same vectors + malformed-input errors + byte-at-a-time feeding
-- `RoundTripTest.java` — encode → decode value preservation (scalars, arrays, strings/blobs, sequences)
-- `ApiTest.java` — offset reserve, flush-sink streaming larger than the buffer, chunked decode
-- `common/RecordingVisitor.java` — shared recording `Visitor`
