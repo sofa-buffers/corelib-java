@@ -31,6 +31,13 @@ import static org.sofabuffers.sofab.WireFormat.zigzagEncode;
  * <p>An initial {@code offset} reserves space at the front of the buffer for a
  * lower-layer protocol header, avoiding a copy.
  *
+ * <p>Writes take a fast path that advances a cursor over the buffer with no
+ * per-byte bounds check whenever the remaining room is known to be sufficient
+ * (a varint is at most ten bytes; a float four or eight); a buffer-spanning slow
+ * path that flushes mid-value is used only when the buffer is too small to hold
+ * the value outright. Raw string / blob payloads are copied in bulk up to each
+ * buffer boundary. The wire output is identical regardless of buffer size.
+ *
  * <p>This class is not thread-safe; encode one message from one thread.
  *
  * <h2>Example</h2>
@@ -139,24 +146,59 @@ public final class OStream {
 
     // --- primitives ---------------------------------------------------------
 
+    /** Hand the full buffer to the sink and resume at its start, or fail if none. */
+    private void flushFull() throws IOException {
+        if (sink == null) {
+            throw new SofabException(SofabError.BUFFER_FULL);
+        }
+        sink.flush(buffer, 0, offset);
+        offset = 0;
+    }
+
     private void pushByte(int b) throws IOException {
         if (offset >= end) {
-            if (sink == null) {
-                throw new SofabException(SofabError.BUFFER_FULL);
-            }
-            sink.flush(buffer, 0, offset);
-            offset = 0;
+            flushFull();
         }
         buffer[offset++] = (byte) b;
     }
 
     private void pushRaw(byte[] data, int from, int len) throws IOException {
-        for (int i = 0; i < len; i++) {
-            pushByte(data[from + i]);
+        // Copy in bulk up to each buffer boundary instead of byte-by-byte, so a
+        // large payload streams out in a handful of System.arraycopy calls.
+        int src = from;
+        int remaining = len;
+        while (remaining > 0) {
+            if (offset >= end) {
+                flushFull();
+            }
+            int n = Math.min(end - offset, remaining);
+            System.arraycopy(data, src, buffer, offset, n);
+            offset += n;
+            src += n;
+            remaining -= n;
         }
     }
 
     private void writeVarint(long value) throws IOException {
+        // Fast path: a base-128 varint is at most 10 bytes. When that much room is
+        // guaranteed, advance a cursor over the buffer with no per-byte bounds or
+        // flush check (the protobuf "write into a contiguous buffer" technique).
+        int p = offset;
+        if (end - p >= 10) {
+            byte[] b = buffer;
+            while ((value & ~0x7FL) != 0) {
+                b[p++] = (byte) ((value & 0x7F) | 0x80);
+                value >>>= 7;
+            }
+            b[p++] = (byte) value;
+            offset = p;
+            return;
+        }
+        writeVarintSlow(value);
+    }
+
+    /** Buffer-spanning varint write: flushes mid-value when the buffer is tiny. */
+    private void writeVarintSlow(long value) throws IOException {
         do {
             int b = (int) (value & 0x7F);
             value >>>= 7;
@@ -165,6 +207,45 @@ public final class OStream {
             }
             pushByte(b);
         } while (value != 0);
+    }
+
+    /** Write four little-endian bytes, fast when the buffer has room. */
+    private void putLe32(int bits) throws IOException {
+        int p = offset;
+        if (end - p >= 4) {
+            byte[] b = buffer;
+            b[p] = (byte) bits;
+            b[p + 1] = (byte) (bits >>> 8);
+            b[p + 2] = (byte) (bits >>> 16);
+            b[p + 3] = (byte) (bits >>> 24);
+            offset = p + 4;
+            return;
+        }
+        pushByte(bits & 0xFF);
+        pushByte((bits >>> 8) & 0xFF);
+        pushByte((bits >>> 16) & 0xFF);
+        pushByte((bits >>> 24) & 0xFF);
+    }
+
+    /** Write eight little-endian bytes, fast when the buffer has room. */
+    private void putLe64(long bits) throws IOException {
+        int p = offset;
+        if (end - p >= 8) {
+            byte[] b = buffer;
+            b[p] = (byte) bits;
+            b[p + 1] = (byte) (bits >>> 8);
+            b[p + 2] = (byte) (bits >>> 16);
+            b[p + 3] = (byte) (bits >>> 24);
+            b[p + 4] = (byte) (bits >>> 32);
+            b[p + 5] = (byte) (bits >>> 40);
+            b[p + 6] = (byte) (bits >>> 48);
+            b[p + 7] = (byte) (bits >>> 56);
+            offset = p + 8;
+            return;
+        }
+        for (int i = 0; i < 8; i++) {
+            pushByte((int) ((bits >>> (i * 8)) & 0xFF));
+        }
     }
 
     private void writeIdType(int id, int wireType) throws IOException {
@@ -246,10 +327,7 @@ public final class OStream {
         int bits = Float.floatToRawIntBits(value);
         writeIdType(id, T_FIXLEN);
         writeVarint((4L << 3) | FixlenType.FP32.raw());
-        pushByte(bits & 0xFF);
-        pushByte((bits >>> 8) & 0xFF);
-        pushByte((bits >>> 16) & 0xFF);
-        pushByte((bits >>> 24) & 0xFF);
+        putLe32(bits);
     }
 
     /**
@@ -263,9 +341,7 @@ public final class OStream {
         long bits = Double.doubleToRawLongBits(value);
         writeIdType(id, T_FIXLEN);
         writeVarint((8L << 3) | FixlenType.FP64.raw());
-        for (int i = 0; i < 8; i++) {
-            pushByte((int) ((bits >>> (i * 8)) & 0xFF));
-        }
+        putLe64(bits);
     }
 
     /**
@@ -442,11 +518,7 @@ public final class OStream {
         writeVarint(data.length);
         writeVarint((4L << 3) | FixlenType.FP32.raw());
         for (float v : data) {
-            int bits = Float.floatToRawIntBits(v);
-            pushByte(bits & 0xFF);
-            pushByte((bits >>> 8) & 0xFF);
-            pushByte((bits >>> 16) & 0xFF);
-            pushByte((bits >>> 24) & 0xFF);
+            putLe32(Float.floatToRawIntBits(v));
         }
     }
 
@@ -465,10 +537,7 @@ public final class OStream {
         writeVarint(data.length);
         writeVarint((8L << 3) | FixlenType.FP64.raw());
         for (double v : data) {
-            long bits = Double.doubleToRawLongBits(v);
-            for (int i = 0; i < 8; i++) {
-                pushByte((int) ((bits >>> (i * 8)) & 0xFF));
-            }
+            putLe64(Double.doubleToRawLongBits(v));
         }
     }
 
