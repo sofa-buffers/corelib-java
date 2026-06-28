@@ -209,7 +209,7 @@ public final class Perf {
         report("deserialize (stream API)", dec, msgSize);
 
         System.out.println();
-        System.out.println("CPU time/op tracks code cost; MB/s is this machine's throughput.");
+        System.out.println("cycles/op tracks code cost; MB/s is this machine's throughput.");
         if (BLACKHOLE == 42) {
             System.out.print(""); // keep BLACKHOLE observably live
         }
