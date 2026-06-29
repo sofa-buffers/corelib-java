@@ -340,7 +340,12 @@ public final class IStream {
         if (p < 0) {
             return i; // count header spilled past the buffer; machine reads it (arrayKind set)
         }
-        while (arrayRemaining > 0) {
+        // Hoist the per-element fields into locals: the inner loop runs once per
+        // array element, so reading {@code id} and writing {@code arrayRemaining}
+        // straight from memory each time would add a load/store to every element.
+        int remaining = arrayRemaining;
+        final int fieldId = id;
+        while (remaining > 0) {
             long val = 0;
             int vs = 0;
             int q = p;
@@ -358,18 +363,21 @@ public final class IStream {
                 }
             }
             if (!complete) {
-                // Element spills past the buffer: machine finishes it from p.
+                // Element spills past the buffer: machine finishes it from p. The
+                // straddling element is still uncounted, so write back its count.
+                arrayRemaining = remaining;
                 state = signed ? State.VARINT_SIGNED : State.VARINT_UNSIGNED;
                 return p;
             }
             if (signed) {
-                visitor.signed(id, zigzagDecode(val));
+                visitor.signed(fieldId, zigzagDecode(val));
             } else {
-                visitor.unsigned(id, val);
+                visitor.unsigned(fieldId, val);
             }
             p = q;
-            arrayRemaining--;
+            remaining--;
         }
+        arrayRemaining = remaining;
         inArray = false;
         state = State.IDLE;
         return p;
@@ -422,22 +430,26 @@ public final class IStream {
         }
         fixlenType = subtype;
         fixlenTotal = size;
-        while (arrayRemaining > 0) {
+        int remaining = arrayRemaining;
+        final int fieldId = id;
+        while (remaining > 0) {
             if (end - p < size) {
                 // Element bytes spill past the buffer: machine accumulates from p.
+                arrayRemaining = remaining;
                 fixlenRemaining = size;
                 accLen = 0;
                 state = State.FIXLEN_VAL;
                 return p;
             }
             if (size == 4) {
-                visitor.fp32(id, Float.intBitsToFloat(readLe32(data, p)));
+                visitor.fp32(fieldId, Float.intBitsToFloat(readLe32(data, p)));
             } else {
-                visitor.fp64(id, Double.longBitsToDouble(readLe64(data, p)));
+                visitor.fp64(fieldId, Double.longBitsToDouble(readLe64(data, p)));
             }
             p += size;
-            arrayRemaining--;
+            remaining--;
         }
+        arrayRemaining = remaining;
         inArray = false;
         state = State.IDLE;
         return p;
