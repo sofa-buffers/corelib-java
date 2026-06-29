@@ -155,6 +155,7 @@ public final class OStream {
         offset = 0;
     }
 
+    /** Append one byte, flushing the full buffer first if it has no room. */
     private void pushByte(int b) throws IOException {
         if (offset >= end) {
             flushFull();
@@ -248,6 +249,7 @@ public final class OStream {
         }
     }
 
+    /** Validate {@code id} and write the field header varint {@code (id << 3) | wireType}. */
     private void writeIdType(int id, int wireType) throws IOException {
         if (id < 0 || id > ID_MAX) {
             throw new SofabException(SofabError.ARGUMENT, "id " + id);
@@ -382,6 +384,7 @@ public final class OStream {
 
     // --- array writers ------------------------------------------------------
 
+    /** Write an array field header (id header then element count); rejects an empty array. */
     private void writeArrayHeader(int id, int wireType, int count) throws IOException {
         if (count <= 0) {
             throw new SofabException(SofabError.ARGUMENT, "empty array");
