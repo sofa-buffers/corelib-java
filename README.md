@@ -112,20 +112,98 @@ new IStream().feed(buf, 0, used, new Visitor() {
 
 ## API summary
 
-**Constants** — `Sofab.API_VERSION` (`1`), `Sofab.ID_MAX`, `Sofab.ARRAY_MAX`.
+**Constants** — `Sofab.API_VERSION` (`1`), `Sofab.ID_MAX` (max field id), `Sofab.ARRAY_MAX`
+(max element count / fixlen length).
 
 **Encoder — `OStream`**
 
+- Construct: `new OStream(byte[] buf)`, `new OStream(byte[] buf, int offset)` (reserve a header gap),
+  `new OStream(byte[] buf, int offset, FlushSink sink)` (stream past the buffer)
 - `writeUnsigned(id, long)`, `writeSigned(id, long)`, `writeBoolean(id, boolean)`
-- `writeFp32(id, float)`, `writeFp64(id, double)`, `writeString(id, String)`, `writeBlob(id, byte[])`, `writeFixlen(id, byte[], from, len, FixlenType)`
-- `writeArrayUnsigned` / `writeArraySigned` — overloads for `byte[]` / `short[]` / `int[]` / `long[]`; `writeArrayFp32(float[])`, `writeArrayFp64(double[])`
-- `writeSequenceBegin(id)`, `writeSequenceEnd()`
+- `writeFp32(id, float)`, `writeFp64(id, double)`, `writeString(id, String)`, `writeBlob(id, byte[])`,
+  `writeBlob(id, byte[], from, len)`, `writeFixlen(id, byte[], from, len, FixlenType)`
+- `writeArrayUnsigned` / `writeArraySigned` — overloads for `byte[]` / `short[]` / `int[]` / `long[]`
+  (u8/u16/u32/u64 and i8/i16/i32/i64); `writeArrayFp32(float[])`, `writeArrayFp64(double[])`.
+  Arrays must be non-empty (an empty array raises `SofabError.ARGUMENT`).
+- `writeSequenceBegin(id)`, `writeSequenceEnd()` — open / close a nested id scope
 - `bytesUsed()`, `flush()`, `bufferSet(byte[], offset)` — drive streaming output through a `FlushSink`
 
 **Decoder — `IStream` + `Visitor`**
 
-- `feed(byte[] data, Visitor)` / `feed(byte[] data, off, len, Visitor)` — accepts arbitrarily small chunks
-- `Visitor` callbacks (all default no-ops, so a handler reads only what it cares about and skips the rest): `unsigned`, `signed`, `fp32`, `fp64`, `string`, `blob` (string / blob delivered in chunks), `arrayBegin`, `sequenceBegin`, `sequenceEnd`
+- `feed(byte[] data, Visitor)` / `feed(byte[] data, off, len, Visitor)` — accepts arbitrarily small chunks;
+  parse state lives inside the `IStream`, so a message may be split across feeds at any byte boundary.
+
+### Read operations
+
+Decoding is **push-based**: there is no per-field "read into this variable" call and no explicit
+`skip`. Instead `feed` parses each field and invokes the matching `Visitor` callback; every callback
+has a **default no-op**, so a handler implements only the field kinds it wants and *unhandled fields
+are skipped automatically* (the equivalent of the C API's "not interested"). The value the decoder
+hands the caller is:
+
+| Wire field | `Visitor` callback | Value handed to caller |
+|------------|--------------------|------------------------|
+| unsigned int | `unsigned(int id, long value)` | `long` (interpret as unsigned 64-bit via `Long.toUnsignedString` / `Long.compareUnsigned`) |
+| signed int | `signed(int id, long value)` | `long` (ZigZag already decoded) |
+| fp32 | `fp32(int id, float value)` | `float` |
+| fp64 | `fp64(int id, double value)` | `double` |
+| string | `string(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength)` | a window into the caller's input buffer (raw UTF-8, no NUL); delivered in one or more chunks |
+| blob | `blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength)` | a window into the caller's input buffer; chunked like `string` |
+| unsigned / signed / fp array | `arrayBegin(int id, ArrayKind kind, int count)`, then one scalar / float callback per element (same `id`) | elements delivered individually through `unsigned` / `signed` / `fp32` / `fp64` |
+| sequence | `sequenceBegin(int id)` … `sequenceEnd()` | descend / ascend a nested id scope (visitor nesting, not a cursor) |
+
+For string / blob, `total` is the full field length and `offset` is the byte position of the chunk
+within the field, so a payload larger than the input chunk (or larger than RAM) never needs to be
+held in one piece. An empty string / blob fires its callback once with `total == 0` and
+`chunkLength == 0`. Malformed input raises `SofabException` with `SofabError.INVALID_MSG`.
+
+### Allowed types
+
+- **Integers** — `u8`/`u16`/`u32`/`u64` and `i8`/`i16`/`i32`/`i64`. Scalar `writeUnsigned` / `writeSigned`
+  always take a full 64-bit `long` (the wire value type is 64-bit); the narrower widths exist only as
+  the `byte[]` / `short[]` / `int[]` / `long[]` array overloads, which zero-extend (unsigned) or
+  ZigZag (signed) each element. On decode every integer is delivered as a `long`.
+- **Floats** — `fp32` = `float`, `fp64` = `double`, written / read little-endian.
+- **String / blob** — UTF-8 text and raw bytes; both are `fixlen` fields.
+- **Disallowed** — `string` / `blob` are **not** valid as fixlen-array elements: a fixlen array may
+  hold only `fp32` or `fp64`. Encoding such an array is not expressible in the API, and decoding one
+  raises `SofabError.INVALID_MSG` ("dynamic fixlen array element"). Empty arrays are also rejected on
+  encode.
+
+### Memory handling
+
+This is the core of the design: **the library never allocates the payload buffer.** State lives in
+caller-provided arrays plus a small fixed `OStream` / `IStream` object; scalars stay primitive
+(`long` / `double`) with no autoboxing on the hot path.
+
+**Encode (`OStream`)**
+
+- The caller owns the output `byte[]`; `OStream` writes straight into it via an advancing cursor
+  (`bytesUsed()` reports the count). There is **no per-write allocation and the buffer never grows.**
+- When the buffer fills: with a `FlushSink`, the accumulated bytes are handed to
+  `sink.flush(buffer, 0, used)` and writing resumes at the start of the same buffer — so a message can
+  exceed the buffer, or RAM. With **no** sink, a full buffer raises `SofabError.BUFFER_FULL`.
+- `flush()` pushes the pending tail to the sink; `bufferSet(byte[], offset)` swaps in a fresh buffer
+  (typically from inside the sink). An initial `offset` reserves a front gap for a lower-layer header.
+- `writeString` encodes UTF-8 **directly into the output buffer** (a measuring pass for the length
+  header, then an emit pass) — it does *not* allocate an intermediate `byte[]` the way
+  `String.getBytes` would.
+
+**Decode (`IStream`)**
+
+- `feed` runs a cursor over the caller's input `byte[]`. Scalars and floats are copied immediately and
+  passed **by value** (`long` / `double`) to the visitor — nothing escapes to the heap.
+- **Strings / blobs are never materialised into a `String` or a fresh `byte[]`.** The decoder hands the
+  visitor a *window* into the caller's input array (`data`, `chunkOffset`, `chunkLength`) that is valid
+  **only for the duration of the call**; a visitor that needs to retain bytes must copy that range
+  itself. No `String` is ever constructed by the decoder.
+- **Array elements are not collected into an array**; each is pushed individually through the scalar /
+  float callbacks after `arrayBegin`. The caller decides whether (and where) to store them.
+- The only heap the decoder uses is a fixed **8-byte scratch buffer** allocated once per `IStream`, used
+  to reassemble a single `fp32` / `fp64` value whose bytes were split across two `feed` calls.
+
+Unlike the C decoder there is **no "bind a destination" step**: where C binds a target pointer that is
+filled later, the Java port pushes the decoded value to the visitor at the moment it is parsed.
 
 ## Feature flags
 
