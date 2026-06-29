@@ -6,7 +6,6 @@
 package org.sofabuffers.sofab;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 
 import static org.sofabuffers.sofab.WireFormat.ID_MAX;
 import static org.sofabuffers.sofab.WireFormat.T_FIXLEN;
@@ -354,8 +353,63 @@ public final class OStream {
      * @throws IOException on buffer overflow or sink failure
      */
     public void writeString(int id, String text) throws IOException {
-        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
-        writeFixlen(id, bytes, 0, bytes.length, FixlenType.STRING);
+        // Encode UTF-8 straight into the output buffer instead of allocating an
+        // intermediate byte[] per call (String.getBytes). One pass measures the
+        // byte length for the fixlen header, the second emits the bytes.
+        int n = utf8Length(text);
+        writeIdType(id, T_FIXLEN);
+        writeVarint(((long) n << 3) | FixlenType.STRING.raw());
+        writeUtf8(text);
+    }
+
+    /** Exact UTF-8 byte length, matching {@link #writeUtf8} (malformed surrogate -&gt; '?'). */
+    private static int utf8Length(String s) {
+        int len = s.length();
+        int bytes = 0;
+        for (int i = 0; i < len; i++) {
+            char c = s.charAt(i);
+            if (c < 0x80) {
+                bytes += 1;
+            } else if (c < 0x800) {
+                bytes += 2;
+            } else if (Character.isHighSurrogate(c) && i + 1 < len
+                    && Character.isLowSurrogate(s.charAt(i + 1))) {
+                bytes += 4;
+                i++;
+            } else if (Character.isSurrogate(c)) {
+                bytes += 1; // unpaired surrogate -> replacement '?'
+            } else {
+                bytes += 3;
+            }
+        }
+        return bytes;
+    }
+
+    /** Emit {@code s} as UTF-8, matching {@code String.getBytes(UTF_8)} byte-for-byte. */
+    private void writeUtf8(String s) throws IOException {
+        int len = s.length();
+        for (int i = 0; i < len; i++) {
+            char c = s.charAt(i);
+            if (c < 0x80) {
+                pushByte(c);
+            } else if (c < 0x800) {
+                pushByte(0xC0 | (c >> 6));
+                pushByte(0x80 | (c & 0x3F));
+            } else if (Character.isHighSurrogate(c) && i + 1 < len
+                    && Character.isLowSurrogate(s.charAt(i + 1))) {
+                int cp = Character.toCodePoint(c, s.charAt(++i));
+                pushByte(0xF0 | (cp >> 18));
+                pushByte(0x80 | ((cp >> 12) & 0x3F));
+                pushByte(0x80 | ((cp >> 6) & 0x3F));
+                pushByte(0x80 | (cp & 0x3F));
+            } else if (Character.isSurrogate(c)) {
+                pushByte('?');
+            } else {
+                pushByte(0xE0 | (c >> 12));
+                pushByte(0x80 | ((c >> 6) & 0x3F));
+                pushByte(0x80 | (c & 0x3F));
+            }
+        }
     }
 
     /**
@@ -430,9 +484,26 @@ public final class OStream {
      */
     public void writeArrayUnsigned(int id, int[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.length);
-        for (int e : data) {
-            writeVarint(e & 0xFFFFFFFFL);
+        byte[] b = buffer;
+        int p = offset;
+        int e = end;
+        for (int elem : data) {
+            long v = elem & 0xFFFFFFFFL;
+            if (e - p < 10) {
+                offset = p;
+                writeVarintSlow(v);
+                b = buffer;
+                p = offset;
+                e = end;
+                continue;
+            }
+            while ((v & ~0x7FL) != 0) {
+                b[p++] = (byte) ((v & 0x7F) | 0x80);
+                v >>>= 7;
+            }
+            b[p++] = (byte) v;
         }
+        offset = p;
     }
 
     /**
@@ -445,9 +516,26 @@ public final class OStream {
      */
     public void writeArrayUnsigned(int id, long[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.length);
-        for (long e : data) {
-            writeVarint(e);
+        byte[] b = buffer;
+        int p = offset;
+        int e = end;
+        for (long elem : data) {
+            long v = elem;
+            if (e - p < 10) {
+                offset = p;
+                writeVarintSlow(v);
+                b = buffer;
+                p = offset;
+                e = end;
+                continue;
+            }
+            while ((v & ~0x7FL) != 0) {
+                b[p++] = (byte) ((v & 0x7F) | 0x80);
+                v >>>= 7;
+            }
+            b[p++] = (byte) v;
         }
+        offset = p;
     }
 
     /**
@@ -487,9 +575,26 @@ public final class OStream {
      */
     public void writeArraySigned(int id, int[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_SIGNED, data.length);
-        for (int e : data) {
-            writeVarint(zigzagEncode(e));
+        byte[] b = buffer;
+        int p = offset;
+        int e = end;
+        for (int elem : data) {
+            long v = zigzagEncode(elem);
+            if (e - p < 10) {
+                offset = p;
+                writeVarintSlow(v);
+                b = buffer;
+                p = offset;
+                e = end;
+                continue;
+            }
+            while ((v & ~0x7FL) != 0) {
+                b[p++] = (byte) ((v & 0x7F) | 0x80);
+                v >>>= 7;
+            }
+            b[p++] = (byte) v;
         }
+        offset = p;
     }
 
     /**
@@ -501,9 +606,26 @@ public final class OStream {
      */
     public void writeArraySigned(int id, long[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_SIGNED, data.length);
-        for (long e : data) {
-            writeVarint(zigzagEncode(e));
+        byte[] b = buffer;
+        int p = offset;
+        int e = end;
+        for (long elem : data) {
+            long v = zigzagEncode(elem);
+            if (e - p < 10) {
+                offset = p;
+                writeVarintSlow(v);
+                b = buffer;
+                p = offset;
+                e = end;
+                continue;
+            }
+            while ((v & ~0x7FL) != 0) {
+                b[p++] = (byte) ((v & 0x7F) | 0x80);
+                v >>>= 7;
+            }
+            b[p++] = (byte) v;
         }
+        offset = p;
     }
 
     /**
