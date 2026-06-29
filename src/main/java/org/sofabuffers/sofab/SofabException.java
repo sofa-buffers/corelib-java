@@ -20,6 +20,7 @@ public final class SofabException extends IOException {
 
     private static final long serialVersionUID = 1L;
 
+    /** The error category that caused this exception. */
     private final SofabError error;
 
     /**

@@ -489,6 +489,7 @@ public final class IStream {
         state = State.FIXLEN_VAL;
     }
 
+    /** Read four little-endian bytes from {@code d} at {@code p} as an {@code int}. */
     private static int readLe32(byte[] d, int p) {
         return (d[p] & 0xFF)
                 | ((d[p + 1] & 0xFF) << 8)
@@ -496,6 +497,7 @@ public final class IStream {
                 | ((d[p + 3] & 0xFF) << 24);
     }
 
+    /** Read eight little-endian bytes from {@code d} at {@code p} as a {@code long}. */
     private static long readLe64(byte[] d, int p) {
         return (d[p] & 0xFFL)
                 | ((d[p + 1] & 0xFFL) << 8)
@@ -507,6 +509,13 @@ public final class IStream {
                 | ((d[p + 7] & 0xFFL) << 56);
     }
 
+    /**
+     * Resumable state machine: feed one byte at the current {@link #state}. This
+     * is the byte-at-a-time counterpart to the {@code fast*} path, used whenever a
+     * field, value or array element was split across {@code feed} calls. Each
+     * {@code step*} handler consumes the byte, and on completing its value emits to
+     * the visitor and transitions {@link #state} to the next field or element.
+     */
     private void step(int b, Visitor visitor) throws SofabException {
         switch (state) {
             case IDLE:            stepIdle(b, visitor); break;
@@ -545,6 +554,12 @@ public final class IStream {
         return false;
     }
 
+    /**
+     * Accumulate the field-header varint at a clean boundary; once complete,
+     * validate the id, record the wire type, and arm the state for the value that
+     * follows. Sequence start/end are emitted here and leave the machine
+     * {@code IDLE} (they carry no value).
+     */
     private void stepIdle(int b, Visitor visitor) throws SofabException {
         if (!varintPush(b)) {
             return;
@@ -601,6 +616,11 @@ public final class IStream {
         }
     }
 
+    /**
+     * Accumulate an unsigned varint value; on completion emit it and advance to
+     * the next array element or back to idle. Serves both scalar fields and
+     * unsigned-array elements.
+     */
     private void stepVarintUnsigned(int b, Visitor visitor) throws SofabException {
         if (varintPush(b)) {
             visitor.unsigned(id, varintOut);
@@ -608,6 +628,10 @@ public final class IStream {
         }
     }
 
+    /**
+     * Accumulate a signed varint value (ZigZag-decoded on completion); otherwise
+     * the signed counterpart of {@link #stepVarintUnsigned}.
+     */
     private void stepVarintSigned(int b, Visitor visitor) throws SofabException {
         if (varintPush(b)) {
             visitor.signed(id, zigzagDecode(varintOut));
@@ -627,6 +651,12 @@ public final class IStream {
         state = State.IDLE;
     }
 
+    /**
+     * Accumulate a fixlen length header ({@code (len << 3) | subtype}). Floats arm
+     * {@link State#FIXLEN_VAL} to read their bytes; a non-empty string/blob arms
+     * {@link State#FIXLEN_RAW} so the payload streams in bulk, while an empty one
+     * is emitted immediately. String/blob are rejected as fixlen-array elements.
+     */
     private void stepFixlenLen(int b, Visitor visitor) throws SofabException {
         if (!varintPush(b)) {
             return;
@@ -679,6 +709,11 @@ public final class IStream {
         }
     }
 
+    /**
+     * Accumulate the fixed-size bytes of a float value into {@link #acc}; once all
+     * are in, decode the fp32/fp64 from little-endian, emit it, and advance to the
+     * next array element (reusing the element size) or back to idle.
+     */
     private void stepFixlenVal(int b, Visitor visitor) throws SofabException {
         acc[accLen++] = (byte) b;
         fixlenRemaining--;
@@ -715,6 +750,11 @@ public final class IStream {
         state = State.IDLE;
     }
 
+    /**
+     * Accumulate an array count header; on completion validate it, emit
+     * {@link Visitor#arrayBegin} once, set up the array context, and arm the
+     * per-element state matching {@link #arrayKind} (varint or fixlen).
+     */
     private void stepArrayCount(int b, Visitor visitor) throws SofabException {
         if (!varintPush(b)) {
             return;
