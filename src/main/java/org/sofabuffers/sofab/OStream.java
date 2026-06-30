@@ -56,6 +56,9 @@ public final class OStream {
     private int offset;
     private final FlushSink sink;
 
+    /** Number of nested sequences currently open; bounded by {@link Sofab#MAX_DEPTH}. */
+    private int depth;
+
     /**
      * Create an encoder over {@code buffer} with no flush sink. Writing past the
      * end of the buffer raises {@link SofabError#BUFFER_FULL}.
@@ -438,10 +441,14 @@ public final class OStream {
 
     // --- array writers ------------------------------------------------------
 
-    /** Write an array field header (id header then element count); rejects an empty array. */
+    /**
+     * Write an array field header (id header then element count). A zero count is
+     * valid (§4.7) and yields exactly {@code [ header ][ count = 0 ]}; only a
+     * negative count is rejected.
+     */
     private void writeArrayHeader(int id, int wireType, int count) throws IOException {
-        if (count <= 0) {
-            throw new SofabException(SofabError.ARGUMENT, "empty array");
+        if (count < 0) {
+            throw new SofabException(SofabError.ARGUMENT, "negative count " + count);
         }
         writeIdType(id, wireType);
         writeVarint(count);
@@ -636,11 +643,11 @@ public final class OStream {
      * @throws IOException on buffer overflow or sink failure
      */
     public void writeArrayFp32(int id, float[] data) throws IOException {
-        if (data.length == 0) {
-            throw new SofabException(SofabError.ARGUMENT, "empty array");
-        }
         writeIdType(id, T_FIXLENARRAY);
         writeVarint(data.length);
+        if (data.length == 0) {
+            return; // §4.8: a zero-count fixlen array carries no fixlen_word/payload
+        }
         writeVarint((4L << 3) | FixlenType.FP32.raw());
         for (float v : data) {
             putLe32(Float.floatToRawIntBits(v));
@@ -655,11 +662,11 @@ public final class OStream {
      * @throws IOException on buffer overflow or sink failure
      */
     public void writeArrayFp64(int id, double[] data) throws IOException {
-        if (data.length == 0) {
-            throw new SofabException(SofabError.ARGUMENT, "empty array");
-        }
         writeIdType(id, T_FIXLENARRAY);
         writeVarint(data.length);
+        if (data.length == 0) {
+            return; // §4.8: a zero-count fixlen array carries no fixlen_word/payload
+        }
         writeVarint((8L << 3) | FixlenType.FP64.raw());
         for (double v : data) {
             putLe64(Double.doubleToRawLongBits(v));
@@ -675,17 +682,29 @@ public final class OStream {
      *
      * @param id field id of the sequence
      * @throws IOException on buffer overflow or sink failure
+     * @throws SofabException with {@link SofabError#ARGUMENT} if opening this
+     *         sequence would exceed {@link Sofab#MAX_DEPTH} nesting levels
      */
     public void writeSequenceBegin(int id) throws IOException {
+        if (depth >= Sofab.MAX_DEPTH) {
+            throw new SofabException(SofabError.ARGUMENT, "sequence nesting exceeds MAX_DEPTH");
+        }
         writeIdType(id, T_SEQUENCE_START);
+        depth++;
     }
 
     /**
      * Close the most recently opened nested sequence.
      *
      * @throws IOException on buffer overflow or sink failure
+     * @throws SofabException with {@link SofabError#USAGE} if there is no open
+     *         sequence to close
      */
     public void writeSequenceEnd() throws IOException {
+        if (depth == 0) {
+            throw new SofabException(SofabError.USAGE, "no open sequence");
+        }
         writeIdType(0, T_SEQUENCE_END);
+        depth--;
     }
 }

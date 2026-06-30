@@ -107,17 +107,107 @@ class EncoderOverloadsTest {
         assertEquals(SofabError.ARGUMENT, ex.error());
     }
 
+    /** Records arrayBegin(count) plus any element callbacks, to prove a zero-count array fires once and carries no elements. */
+    private static final class ArrayRecorder implements Visitor {
+        int beginCount = -1;
+        int beginCalls;
+        int elements;
+        @Override public void arrayBegin(int id, ArrayKind kind, int count) { beginCount = count; beginCalls++; }
+        @Override public void unsigned(int id, long v) { elements++; }
+        @Override public void signed(int id, long v) { elements++; }
+        @Override public void fp32(int id, float v) { elements++; }
+        @Override public void fp64(int id, double v) { elements++; }
+    }
+
     @Test
-    void emptyArraysRejected() {
-        OStream os = new OStream(new byte[16]);
-        assertEquals(SofabError.ARGUMENT,
-                assertThrows(SofabException.class, () -> os.writeArrayUnsigned(1, new int[0])).error());
-        assertEquals(SofabError.ARGUMENT,
-                assertThrows(SofabException.class, () -> os.writeArraySigned(1, new long[0])).error());
-        assertEquals(SofabError.ARGUMENT,
-                assertThrows(SofabException.class, () -> os.writeArrayFp32(1, new float[0])).error());
-        assertEquals(SofabError.ARGUMENT,
-                assertThrows(SofabException.class, () -> os.writeArrayFp64(1, new double[0])).error());
+    void emptyUnsignedArrayRoundTrips() throws IOException {
+        byte[] buf = new byte[16];
+        OStream os = new OStream(buf);
+        os.writeArrayUnsigned(7, new int[0]);
+        // Wire form is exactly [ header = (7<<3)|3 ][ count = 0 ].
+        assertEquals(2, os.bytesUsed());
+        assertArrayEquals(new byte[] {(byte) ((7 << 3) | 3), 0}, Arrays.copyOf(buf, 2));
+
+        ArrayRecorder rec = new ArrayRecorder();
+        new IStream().feed(buf, 0, os.bytesUsed(), rec);
+        assertEquals(1, rec.beginCalls);
+        assertEquals(0, rec.beginCount);
+        assertEquals(0, rec.elements);
+    }
+
+    @Test
+    void emptySignedArrayRoundTrips() throws IOException {
+        byte[] buf = new byte[16];
+        OStream os = new OStream(buf);
+        os.writeArraySigned(7, new long[0]);
+        assertEquals(2, os.bytesUsed());
+        assertArrayEquals(new byte[] {(byte) ((7 << 3) | 4), 0}, Arrays.copyOf(buf, 2));
+
+        ArrayRecorder rec = new ArrayRecorder();
+        new IStream().feed(buf, 0, os.bytesUsed(), rec);
+        assertEquals(1, rec.beginCalls);
+        assertEquals(0, rec.beginCount);
+        assertEquals(0, rec.elements);
+    }
+
+    @Test
+    void emptyFixlenArraysCarryNoFixlenWord() throws IOException {
+        // §4.8: a zero-count fp32/fp64 array is exactly [ header ][ count = 0 ] — no fixlen_word.
+        byte[] buf = new byte[16];
+
+        OStream os = new OStream(buf);
+        os.writeArrayFp32(7, new float[0]);
+        assertEquals(2, os.bytesUsed());
+        assertArrayEquals(new byte[] {(byte) ((7 << 3) | 5), 0}, Arrays.copyOf(buf, 2));
+        ArrayRecorder rec = new ArrayRecorder();
+        new IStream().feed(buf, 0, os.bytesUsed(), rec);
+        assertEquals(1, rec.beginCalls);
+        assertEquals(0, rec.beginCount);
+        assertEquals(0, rec.elements);
+
+        os = new OStream(buf);
+        os.writeArrayFp64(7, new double[0]);
+        assertEquals(2, os.bytesUsed());
+        assertArrayEquals(new byte[] {(byte) ((7 << 3) | 5), 0}, Arrays.copyOf(buf, 2));
+        rec = new ArrayRecorder();
+        new IStream().feed(buf, 0, os.bytesUsed(), rec);
+        assertEquals(1, rec.beginCalls);
+        assertEquals(0, rec.beginCount);
+        assertEquals(0, rec.elements);
+    }
+
+    @Test
+    void emptyArrayFollowedByFieldDecodesBoth() throws IOException {
+        // An empty fixlen array must not swallow the next field's bytes (no phantom fixlen_word).
+        byte[] buf = new byte[32];
+        OStream os = new OStream(buf);
+        os.writeArrayFp32(1, new float[0]);
+        os.writeUnsigned(2, 42);
+        int len = os.bytesUsed();
+
+        // Whole-buffer and byte-at-a-time feeds must agree.
+        for (int chunk : new int[] {len, 1}) {
+            List<Long> unsigned = new ArrayList<>();
+            int[] beginCount = {-1};
+            Visitor v = new Visitor() {
+                @Override public void arrayBegin(int id, ArrayKind kind, int count) { beginCount[0] = count; }
+                @Override public void unsigned(int id, long val) { unsigned.add(val); }
+            };
+            IStream is = new IStream();
+            for (int o = 0; o < len; o += chunk) {
+                is.feed(buf, o, Math.min(chunk, len - o), v);
+            }
+            assertEquals(0, beginCount[0]);
+            assertEquals(List.of(42L), unsigned);
+        }
+    }
+
+    @Test
+    void writeSequenceEndWithoutOpenSequenceRejected() {
+        // Empty arrays are now accepted (see tests above); the encoder's remaining
+        // structural guard is an unbalanced sequence end.
+        assertEquals(SofabError.USAGE,
+                assertThrows(SofabException.class, () -> new OStream(new byte[16]).writeSequenceEnd()).error());
     }
 
     @Test

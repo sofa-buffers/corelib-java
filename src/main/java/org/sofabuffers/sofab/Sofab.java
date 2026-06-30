@@ -31,4 +31,12 @@ public final class Sofab {
      * ({@code INT32_MAX}).
      */
     public static final long ARRAY_MAX = Integer.MAX_VALUE;
+
+    /**
+     * Maximum nested-sequence depth (§4.9 / §6.2). An encoder must not open more
+     * than {@code MAX_DEPTH} nested sequences, and a decoder rejects a message that
+     * nests deeper with {@link SofabError#INVALID_MSG}, bounding recursion / stack
+     * growth.
+     */
+    public static final int MAX_DEPTH = 255;
 }

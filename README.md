@@ -35,7 +35,8 @@ unit tests replay the shared, language-agnostic conformance suite
 encode and decode, guaranteeing byte-for-byte interoperability with the C, C++,
 Rust and Go implementations.
 
-Maven coordinates: `org.sofabuffers:sofab` · package `org.sofabuffers.sofab`.
+Maven coordinates: `org.sofabuffers:SofaBuffers` · package `org.sofabuffers.sofab`
+(the registry package name is `SofaBuffers`; the import namespace stays `sofab`, §6).
 Requires JDK 17+.
 
 ## Why this design
@@ -255,9 +256,15 @@ mvn -q compile exec:java -Dexec.mainClass=org.sofabuffers.sofab.bench.Bench  # t
 - **`Perf`** reports per-operation cost. The JVM exposes no portable hardware cycle
   counter, so — unlike the C / Rust tools on x86 / AArch64 — `Perf` reports
   thread-CPU-time ns/op (the machine-independent signal it can measure) and notes
-  that cycles/op is unavailable.
+  that cycles/op is unavailable. For a genuinely CPU-speed-independent number, run
+  `Perf` under an external counter (e.g. `perf stat -e instructions:u …`); see
+  [`BENCH_SPEC.md`](BENCH_SPEC.md).
 - **`Bench`** reports encode / decode throughput in MB/s (MB = 1e6 bytes) over a
   ~1 s CPU-time loop.
+
+The exact workloads, timing rules, throughput formula, and output grammar are the
+single source of truth in [`BENCH_SPEC.md`](BENCH_SPEC.md), so the numbers stay
+comparable across the language ports.
 
 ## Layering vs. the C library
 

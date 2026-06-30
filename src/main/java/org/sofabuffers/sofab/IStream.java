@@ -206,8 +206,8 @@ public final class IStream {
 
         switch (wireType) {
             case T_SEQUENCE_START:
-                if (depth == Long.MAX_VALUE) {
-                    throw new SofabException(SofabError.INVALID_MSG, "sequence too deep");
+                if (depth >= Sofab.MAX_DEPTH) {
+                    throw new SofabException(SofabError.INVALID_MSG, "sequence nesting exceeds MAX_DEPTH");
                 }
                 depth++;
                 visitor.sequenceBegin(id);
@@ -389,6 +389,13 @@ public final class IStream {
         if (p < 0) {
             return i; // count header spilled past the buffer; machine reads it
         }
+        if (arrayRemaining == 0) {
+            // §4.8: a zero-count fixlen array carries no fixlen_word/payload; the
+            // field ends at the count. Do not consume the following field's bytes.
+            inArray = false;
+            state = State.IDLE;
+            return p;
+        }
         // Element length header is encoded once and reused for every element.
         long fh = 0;
         int shift = 0;
@@ -482,7 +489,8 @@ public final class IStream {
                 throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
             }
         }
-        if (count == 0 || Long.compareUnsigned(count, ARRAY_MAX) > 0) {
+        // count == 0 is a valid empty array (§4.7/§4.8); only an oversized count is rejected.
+        if (Long.compareUnsigned(count, ARRAY_MAX) > 0) {
             throw new SofabException(SofabError.INVALID_MSG, "array count");
         }
         int c = (int) count;
@@ -608,8 +616,8 @@ public final class IStream {
                 state = State.ARRAY_COUNT;
                 break;
             case T_SEQUENCE_START:
-                if (depth == Long.MAX_VALUE) {
-                    throw new SofabException(SofabError.INVALID_MSG, "sequence too deep");
+                if (depth >= Sofab.MAX_DEPTH) {
+                    throw new SofabException(SofabError.INVALID_MSG, "sequence nesting exceeds MAX_DEPTH");
                 }
                 depth++;
                 visitor.sequenceBegin(id);
@@ -772,13 +780,22 @@ public final class IStream {
             return;
         }
         long count = varintOut;
-        if (count == 0 || Long.compareUnsigned(count, ARRAY_MAX) > 0) {
+        // count == 0 is a valid empty array (§4.7/§4.8); only an oversized count is rejected.
+        if (Long.compareUnsigned(count, ARRAY_MAX) > 0) {
             throw new SofabException(SofabError.INVALID_MSG, "array count");
         }
         int c = (int) count;
         arrayRemaining = c;
         inArray = true;
         visitor.arrayBegin(id, arrayKind, c);
+
+        if (c == 0) {
+            // Empty array: no elements follow, and for a fixlen array no fixlen_word
+            // follows either (§4.8). The field ends at the count.
+            inArray = false;
+            state = State.IDLE;
+            return;
+        }
 
         switch (arrayKind) {
             case UNSIGNED:

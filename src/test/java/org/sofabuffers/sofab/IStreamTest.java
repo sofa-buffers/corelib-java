@@ -113,9 +113,11 @@ class IStreamTest {
     }
 
     @Test
-    void zeroLengthArrayRejected() {
-        SofabException ex = assertThrows(SofabException.class, () -> decode(bytes(0x03, 0x00)));
-        assertEquals(SofabError.INVALID_MSG, ex.error());
+    void zeroLengthArrayAccepted() throws SofabException {
+        // §4.7: a zero-count array is valid — header [ (0<<3)|3 ] then count 0.
+        // arrayBegin fires once with count 0 and no element callbacks follow.
+        assertEquals(List.of("arr:0:UNSIGNED:0"), decode(bytes(0x03, 0x00)));
+        assertEquals(List.of("arr:0:UNSIGNED:0"), decodeByteByByte(bytes(0x03, 0x00)));
     }
 
     @Test
