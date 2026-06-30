@@ -132,7 +132,15 @@ class StateMachineCoverageTest {
     }
 
     @Test
-    void zeroLengthArrayViaStateMachine() {
-        assertEquals(SofabError.INVALID_MSG, slowError(bytes(0x03, 0x00)));
+    void zeroLengthArrayViaStateMachine() throws SofabException {
+        // §4.7: a zero-count array is valid even when count and header straddle
+        // chunk boundaries — fed one byte at a time, arrayBegin still fires once
+        // with count 0 and no element callbacks follow.
+        RecordingVisitor v = new RecordingVisitor();
+        IStream is = new IStream();
+        for (byte b : bytes(0x03, 0x00)) {
+            is.feed(new byte[] {b}, v);
+        }
+        assertEquals(List.of("arr:0:UNSIGNED:0"), v.events);
     }
 }
