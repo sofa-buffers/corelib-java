@@ -14,6 +14,10 @@
  *      from *thread CPU time* (not wall-clock), the JVM equivalent of the C
  *      tool's clock(). MB = 1e6 bytes.
  *
+ * For a CPU-speed-independent figure on this host, run under an external counter
+ * (e.g. `perf stat -e instructions:u ...`) and divide by the printed iteration
+ * count. Workloads, timing rules and output grammar are specified in BENCH_SPEC.md.
+ *
  * Run with:
  *   mvn -q compile exec:java -Dexec.mainClass=org.sofabuffers.sofab.bench.Perf
  *
