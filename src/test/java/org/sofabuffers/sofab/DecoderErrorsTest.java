@@ -8,6 +8,8 @@ package org.sofabuffers.sofab;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.util.Arrays;
+
 import org.junit.jupiter.api.Test;
 
 class DecoderErrorsTest {
@@ -60,5 +62,23 @@ class DecoderErrorsTest {
     void fixlenLengthAboveMaxRejected() {
         // fixlen string (id 0) with length 2^31 (> ARRAY_MAX): header (2^31 << 3) | STRING(2).
         assertEquals(SofabError.INVALID_MSG, errorOf(bytes(0x02, 0x82, 0x80, 0x80, 0x80, 0x40)));
+    }
+
+    @Test
+    void nestingAtMaxDepthAccepted() throws SofabException {
+        // MAX_DEPTH (255) nested sequence-start markers (id 0 -> 0x06), then their ends
+        // (0x07), is the deepest legal nesting and must decode without error.
+        byte[] data = new byte[Sofab.MAX_DEPTH * 2];
+        Arrays.fill(data, 0, Sofab.MAX_DEPTH, (byte) 0x06);
+        Arrays.fill(data, Sofab.MAX_DEPTH, data.length, (byte) 0x07);
+        new IStream().feed(data, new Visitor() { });
+    }
+
+    @Test
+    void nestingBeyondMaxDepthRejected() {
+        // 256 nested sequence starts exceeds MAX_DEPTH = 255 and must be rejected.
+        byte[] data = new byte[Sofab.MAX_DEPTH + 1];
+        Arrays.fill(data, (byte) 0x06);
+        assertEquals(SofabError.INVALID_MSG, errorOf(data));
     }
 }

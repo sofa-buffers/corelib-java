@@ -205,4 +205,35 @@ class OStreamTest {
                 () -> new OStream(new byte[2]).writeUnsigned(0, -1L));
         assertEquals(SofabError.BUFFER_FULL, ex.error());
     }
+
+    @Test
+    void maxDepthNestingAccepted() throws IOException {
+        // Opening (and closing) MAX_DEPTH = 255 nested sequences is the deepest legal nesting.
+        byte[] buf = new byte[2 * Sofab.MAX_DEPTH];
+        OStream os = new OStream(buf);
+        for (int i = 0; i < Sofab.MAX_DEPTH; i++) {
+            os.writeSequenceBegin(0);
+        }
+        for (int i = 0; i < Sofab.MAX_DEPTH; i++) {
+            os.writeSequenceEnd();
+        }
+        assertEquals(2 * Sofab.MAX_DEPTH, os.bytesUsed());
+    }
+
+    @Test
+    void nestingBeyondMaxDepthRejected() throws IOException {
+        OStream os = new OStream(new byte[2 * Sofab.MAX_DEPTH + 8]);
+        for (int i = 0; i < Sofab.MAX_DEPTH; i++) {
+            os.writeSequenceBegin(0);
+        }
+        SofabException ex = assertThrows(SofabException.class, () -> os.writeSequenceBegin(0));
+        assertEquals(SofabError.ARGUMENT, ex.error());
+    }
+
+    @Test
+    void unbalancedSequenceEndRejected() {
+        SofabException ex = assertThrows(SofabException.class,
+                () -> new OStream(new byte[16]).writeSequenceEnd());
+        assertEquals(SofabError.USAGE, ex.error());
+    }
 }
