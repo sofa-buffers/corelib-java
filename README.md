@@ -35,8 +35,9 @@ unit tests replay the shared, language-agnostic conformance suite
 encode and decode, guaranteeing byte-for-byte interoperability with the C, C++,
 Rust and Go implementations.
 
-Maven coordinates: `org.sofabuffers:SofaBuffers` · package `org.sofabuffers.sofab`
-(the registry package name is `SofaBuffers`; the import namespace stays `sofab`, §6).
+Maven coordinates: `org.sofabuffers:corelib` · package `org.sofabuffers.sofab`
+(the registry artifact is `org.sofabuffers:corelib`; the import namespace stays `sofab`, §6).
+The published artifact coordinate is `org.sofabuffers:corelib`.
 Requires JDK 17+.
 
 ## Why this design
