@@ -151,14 +151,17 @@ class EncoderOverloadsTest {
     }
 
     @Test
-    void emptyFixlenArraysCarryNoFixlenWord() throws IOException {
-        // §4.8: a zero-count fp32/fp64 array is exactly [ header ][ count = 0 ] — no fixlen_word.
+    void emptyFixlenArraysCarryTheFixlenWord() throws IOException {
+        // §4.8: a zero-count fp32/fp64 array is [ header ][ count = 0 ][ fixlen_word ]
+        // — the fixlen_word is always present so an empty fp32 array is
+        // distinguishable on the wire from an empty fp64 array.
         byte[] buf = new byte[16];
 
         OStream os = new OStream(buf);
         os.writeArrayFp32(7, new float[0]);
-        assertEquals(2, os.bytesUsed());
-        assertArrayEquals(new byte[] {(byte) ((7 << 3) | 5), 0}, Arrays.copyOf(buf, 2));
+        assertEquals(3, os.bytesUsed());
+        // fixlen_word 0x20 = (4 << 3) | fp32-subtype(0).
+        assertArrayEquals(new byte[] {(byte) ((7 << 3) | 5), 0, 0x20}, Arrays.copyOf(buf, 3));
         ArrayRecorder rec = new ArrayRecorder();
         new IStream().feed(buf, 0, os.bytesUsed(), rec);
         assertEquals(1, rec.beginCalls);
@@ -167,8 +170,9 @@ class EncoderOverloadsTest {
 
         os = new OStream(buf);
         os.writeArrayFp64(7, new double[0]);
-        assertEquals(2, os.bytesUsed());
-        assertArrayEquals(new byte[] {(byte) ((7 << 3) | 5), 0}, Arrays.copyOf(buf, 2));
+        assertEquals(3, os.bytesUsed());
+        // fixlen_word 0x41 = (8 << 3) | fp64-subtype(1).
+        assertArrayEquals(new byte[] {(byte) ((7 << 3) | 5), 0, 0x41}, Arrays.copyOf(buf, 3));
         rec = new ArrayRecorder();
         new IStream().feed(buf, 0, os.bytesUsed(), rec);
         assertEquals(1, rec.beginCalls);

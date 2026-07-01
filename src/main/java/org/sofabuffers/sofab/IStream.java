@@ -389,13 +389,9 @@ public final class IStream {
         if (p < 0) {
             return i; // count header spilled past the buffer; machine reads it
         }
-        if (arrayRemaining == 0) {
-            // §4.8: a zero-count fixlen array carries no fixlen_word/payload; the
-            // field ends at the count. Do not consume the following field's bytes.
-            inArray = false;
-            state = State.IDLE;
-            return p;
-        }
+        // §4.8: a fixlen array always carries its fixlen_word, even when empty, so
+        // an empty fp32 array is distinguishable from an empty fp64 array. Read it
+        // unconditionally; the payload loop below runs zero times when empty.
         // Element length header is encoded once and reused for every element.
         long fh = 0;
         int shift = 0;
@@ -699,13 +695,13 @@ public final class IStream {
                 if (length != 4) {
                     throw new SofabException(SofabError.INVALID_MSG, "fp32 length " + length);
                 }
-                state = State.FIXLEN_VAL;
+                state = afterFixlenWord();
                 break;
             case FP64:
                 if (length != 8) {
                     throw new SofabException(SofabError.INVALID_MSG, "fp64 length " + length);
                 }
-                state = State.FIXLEN_VAL;
+                state = afterFixlenWord();
                 break;
             case STRING:
             case BLOB:
@@ -727,6 +723,19 @@ public final class IStream {
             default:
                 throw new SofabException(SofabError.INVALID_MSG, "fixlen type");
         }
+    }
+
+    /**
+     * Next state after a fixlen_word has been read. For an empty fixlen array the
+     * word is the whole field — no payload follows (§4.8) — so the array is closed
+     * and the machine returns to idle; otherwise the fixed-size value bytes follow.
+     */
+    private State afterFixlenWord() {
+        if (inArray && arrayRemaining == 0) {
+            inArray = false;
+            return State.IDLE;
+        }
+        return State.FIXLEN_VAL;
     }
 
     /**
@@ -789,13 +798,16 @@ public final class IStream {
         inArray = true;
         visitor.arrayBegin(id, arrayKind, c);
 
-        if (c == 0) {
-            // Empty array: no elements follow, and for a fixlen array no fixlen_word
-            // follows either (§4.8). The field ends at the count.
+        if (c == 0 && arrayKind != ArrayKind.FIXLEN) {
+            // Empty varint array: no elements and no fixlen_word follow; the field
+            // ends at the count.
             inArray = false;
             state = State.IDLE;
             return;
         }
+        // A fixlen array always carries its fixlen_word, even when empty (§4.8), so
+        // an empty one still advances into FIXLEN_LEN to consume it; stepFixlenLen
+        // finishes an empty array once the word is read (no payload follows).
 
         switch (arrayKind) {
             case UNSIGNED:

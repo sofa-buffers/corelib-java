@@ -645,9 +645,10 @@ public final class OStream {
     public void writeArrayFp32(int id, float[] data) throws IOException {
         writeIdType(id, T_FIXLENARRAY);
         writeVarint(data.length);
-        if (data.length == 0) {
-            return; // §4.8: a zero-count fixlen array carries no fixlen_word/payload
-        }
+        // §4.8: a fixlen array always carries its fixlen_word (the shared element
+        // subtype/width), even when empty, so an empty fp32 array is
+        // distinguishable on the wire from an empty fp64 array. The payload loop
+        // simply runs zero times when the array is empty.
         writeVarint((4L << 3) | FixlenType.FP32.raw());
         for (float v : data) {
             putLe32(Float.floatToRawIntBits(v));
@@ -664,9 +665,10 @@ public final class OStream {
     public void writeArrayFp64(int id, double[] data) throws IOException {
         writeIdType(id, T_FIXLENARRAY);
         writeVarint(data.length);
-        if (data.length == 0) {
-            return; // §4.8: a zero-count fixlen array carries no fixlen_word/payload
-        }
+        // §4.8: a fixlen array always carries its fixlen_word (the shared element
+        // subtype/width), even when empty, so an empty fp64 array is
+        // distinguishable on the wire from an empty fp32 array. The payload loop
+        // simply runs zero times when the array is empty.
         writeVarint((8L << 3) | FixlenType.FP64.raw());
         for (double v : data) {
             putLe64(Double.doubleToRawLongBits(v));
