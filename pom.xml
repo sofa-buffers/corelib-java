@@ -5,12 +5,12 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>org.sofabuffers</groupId>
-  <!-- Registry/package name is SofaBuffers (§6); the Java namespace stays org.sofabuffers.sofab. -->
-  <artifactId>SofaBuffers</artifactId>
+  <!-- Registry/artifact coordinate is org.sofabuffers:corelib (§6); the Java namespace stays org.sofabuffers.sofab. -->
+  <artifactId>corelib</artifactId>
   <version>0.1.0</version>
   <packaging>jar</packaging>
 
-  <name>SofaBuffers Java</name>
+  <name>SofaBuffers CoreLib (Java)</name>
   <description>Dependency-free, allocation-light, streaming Java implementation of the SofaBuffers (Sofab) serialization format.</description>
   <url>https://github.com/sofa-buffers/corelib-java</url>
 
