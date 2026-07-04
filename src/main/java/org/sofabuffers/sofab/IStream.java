@@ -124,6 +124,16 @@ public final class IStream {
         int i = off;
         final int end = off + len;
         while (i < end) {
+            // Fast path first: at a clean field boundary with bytes in hand,
+            // advance a pointer over the contiguous buffer decoding whole fields
+            // (and whole array elements) with no per-byte state dispatch. This is
+            // the steady state for whole-message feeds, so it is checked before
+            // the split-field cases below.
+            if (state == State.IDLE && varintShift == 0) {
+                i = fastField(data, i, end, visitor);
+                continue;
+            }
+
             // Bulk path: stream string/blob payloads with one callback per chunk
             // rather than one per byte.
             if (state == State.FIXLEN_RAW) {
@@ -149,18 +159,8 @@ public final class IStream {
             // partially read value/payload; {@code varintShift != 0} while IDLE
             // covers a partially read field header (header reading is the IDLE
             // state's varint accumulation).
-            if (state != State.IDLE || varintShift != 0) {
-                step(data[i] & 0xFF, visitor);
-                i++;
-                continue;
-            }
-
-            // Fast path: at a clean field boundary with bytes in hand, advance a
-            // pointer over the contiguous buffer decoding whole fields (and whole
-            // array elements) with no per-byte state dispatch. Anything that would
-            // run past {@code end} is handed back to the state machine, which
-            // suspends and resumes on the next feed.
-            i = fastField(data, i, end, visitor);
+            step(data[i] & 0xFF, visitor);
+            i++;
         }
     }
 
@@ -175,25 +175,44 @@ public final class IStream {
     private int fastField(byte[] data, int i, int end, Visitor visitor) throws SofabException {
         // --- field header varint (id << 3 | type); decoded into locals so nothing
         //     is committed until the whole header is present in this buffer ---
-        long header = 0;
-        int shift = 0;
+        long header;
         int p = i;
-        while (true) {
-            if (p >= end) {
-                // Header runs past the buffer: feed this byte to the state machine
-                // (which accumulates the header in the IDLE state) and let the feed
-                // loop drive the rest.
-                step(data[i] & 0xFF, visitor);
-                return i + 1;
+        if (end - p >= 10) {
+            // Room for a max-length (10-byte) varint: decode with no per-byte
+            // bounds check, continuation flagged by the sign bit of the raw byte.
+            int b = data[p++];
+            header = b & 0x7F;
+            if (b < 0) {
+                int shift = 7;
+                do {
+                    b = data[p++];
+                    header |= ((long) (b & 0x7F)) << shift;
+                    shift += 7;
+                } while (b < 0 && shift < VALUE_BITS);
+                if (b < 0) {
+                    throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+                }
             }
-            int b = data[p++] & 0xFF;
-            header |= ((long) (b & 0x7F)) << shift;
-            shift += 7;
-            if ((b & 0x80) == 0) {
-                break;
-            }
-            if (shift >= VALUE_BITS) {
-                throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+        } else {
+            header = 0;
+            int shift = 0;
+            while (true) {
+                if (p >= end) {
+                    // Header runs past the buffer: feed this byte to the state machine
+                    // (which accumulates the header in the IDLE state) and let the feed
+                    // loop drive the rest.
+                    step(data[i] & 0xFF, visitor);
+                    return i + 1;
+                }
+                int b = data[p++] & 0xFF;
+                header |= ((long) (b & 0x7F)) << shift;
+                shift += 7;
+                if ((b & 0x80) == 0) {
+                    break;
+                }
+                if (shift >= VALUE_BITS) {
+                    throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+                }
             }
         }
         int wireType = (int) (header & 0x07);
@@ -221,24 +240,42 @@ public final class IStream {
                 return p;
             case T_VARINT_UNSIGNED:
             case T_VARINT_SIGNED: {
-                long val = 0;
-                int vs = 0;
+                long val;
                 int q = p;
-                while (true) {
-                    if (q >= end) {
-                        // Value spills past the buffer: the machine reads it from p.
-                        state = (wireType == T_VARINT_UNSIGNED)
-                                ? State.VARINT_UNSIGNED : State.VARINT_SIGNED;
-                        return p;
+                if (end - q >= 10) {
+                    // Bounds-check-free decode (see the header varint above).
+                    int b = data[q++];
+                    val = b & 0x7F;
+                    if (b < 0) {
+                        int vs = 7;
+                        do {
+                            b = data[q++];
+                            val |= ((long) (b & 0x7F)) << vs;
+                            vs += 7;
+                        } while (b < 0 && vs < VALUE_BITS);
+                        if (b < 0) {
+                            throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+                        }
                     }
-                    int b = data[q++] & 0xFF;
-                    val |= ((long) (b & 0x7F)) << vs;
-                    vs += 7;
-                    if ((b & 0x80) == 0) {
-                        break;
-                    }
-                    if (vs >= VALUE_BITS) {
-                        throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+                } else {
+                    val = 0;
+                    int vs = 0;
+                    while (true) {
+                        if (q >= end) {
+                            // Value spills past the buffer: the machine reads it from p.
+                            state = (wireType == T_VARINT_UNSIGNED)
+                                    ? State.VARINT_UNSIGNED : State.VARINT_SIGNED;
+                            return p;
+                        }
+                        int b = data[q++] & 0xFF;
+                        val |= ((long) (b & 0x7F)) << vs;
+                        vs += 7;
+                        if ((b & 0x80) == 0) {
+                            break;
+                        }
+                        if (vs >= VALUE_BITS) {
+                            throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+                        }
                     }
                 }
                 if (wireType == T_VARINT_UNSIGNED) {
@@ -346,35 +383,54 @@ public final class IStream {
         int remaining = arrayRemaining;
         final int fieldId = id;
         while (remaining > 0) {
-            long val = 0;
-            int vs = 0;
-            int q = p;
-            boolean complete = false;
-            while (q < end) {
-                int b = data[q++] & 0xFF;
-                val |= ((long) (b & 0x7F)) << vs;
-                vs += 7;
-                if ((b & 0x80) == 0) {
-                    complete = true;
-                    break;
+            long val;
+            if (end - p >= 10) {
+                // Bounds-check-free element decode: room for a max-length varint
+                // is guaranteed, continuation flagged by the raw byte's sign bit.
+                int b = data[p++];
+                val = b & 0x7F;
+                if (b < 0) {
+                    int vs = 7;
+                    do {
+                        b = data[p++];
+                        val |= ((long) (b & 0x7F)) << vs;
+                        vs += 7;
+                    } while (b < 0 && vs < VALUE_BITS);
+                    if (b < 0) {
+                        throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+                    }
                 }
-                if (vs >= VALUE_BITS) {
-                    throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+            } else {
+                val = 0;
+                int vs = 0;
+                int q = p;
+                boolean complete = false;
+                while (q < end) {
+                    int b = data[q++] & 0xFF;
+                    val |= ((long) (b & 0x7F)) << vs;
+                    vs += 7;
+                    if ((b & 0x80) == 0) {
+                        complete = true;
+                        break;
+                    }
+                    if (vs >= VALUE_BITS) {
+                        throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+                    }
                 }
-            }
-            if (!complete) {
-                // Element spills past the buffer: machine finishes it from p. The
-                // straddling element is still uncounted, so write back its count.
-                arrayRemaining = remaining;
-                state = signed ? State.VARINT_SIGNED : State.VARINT_UNSIGNED;
-                return p;
+                if (!complete) {
+                    // Element spills past the buffer: machine finishes it from p. The
+                    // straddling element is still uncounted, so write back its count.
+                    arrayRemaining = remaining;
+                    state = signed ? State.VARINT_SIGNED : State.VARINT_UNSIGNED;
+                    return p;
+                }
+                p = q;
             }
             if (signed) {
                 visitor.signed(fieldId, zigzagDecode(val));
             } else {
                 visitor.unsigned(fieldId, val);
             }
-            p = q;
             remaining--;
         }
         arrayRemaining = remaining;

@@ -186,13 +186,20 @@ public final class OStream {
         // Fast path: a base-128 varint is at most 10 bytes. When that much room is
         // guaranteed, advance a cursor over the buffer with no per-byte bounds or
         // flush check (the protobuf "write into a contiguous buffer" technique).
+        // Single-byte values (field headers, small scalars) are by far the most
+        // common and skip the loop entirely.
         int p = offset;
         if (end - p >= 10) {
             byte[] b = buffer;
-            while ((value & ~0x7FL) != 0) {
-                b[p++] = (byte) ((value & 0x7F) | 0x80);
-                value >>>= 7;
+            if ((value & ~0x7FL) == 0) {
+                b[p] = (byte) value;
+                offset = p + 1;
+                return;
             }
+            do {
+                b[p++] = (byte) (((int) value & 0x7F) | 0x80);
+                value >>>= 7;
+            } while ((value & ~0x7FL) != 0);
             b[p++] = (byte) value;
             offset = p;
             return;
@@ -362,14 +369,19 @@ public final class OStream {
         int n = utf8Length(text);
         writeIdType(id, T_FIXLEN);
         writeVarint(((long) n << 3) | FixlenType.STRING.raw());
-        writeUtf8(text);
+        writeUtf8(text, n);
     }
 
     /** Exact UTF-8 byte length, matching {@link #writeUtf8} (malformed surrogate -&gt; '?'). */
     private static int utf8Length(String s) {
         int len = s.length();
-        int bytes = 0;
-        for (int i = 0; i < len; i++) {
+        // ASCII prefix scan: one compare per char, no per-char byte accounting.
+        int i = 0;
+        while (i < len && s.charAt(i) < 0x80) {
+            i++;
+        }
+        int bytes = i;
+        for (; i < len; i++) {
             char c = s.charAt(i);
             if (c < 0x80) {
                 bytes += 1;
@@ -388,8 +400,56 @@ public final class OStream {
         return bytes;
     }
 
-    /** Emit {@code s} as UTF-8, matching {@code String.getBytes(UTF_8)} byte-for-byte. */
-    private void writeUtf8(String s) throws IOException {
+    /**
+     * Emit {@code s} as UTF-8, matching {@code String.getBytes(UTF_8)} byte-for-byte.
+     * {@code n} is the exact byte length already measured by {@link #utf8Length};
+     * when the buffer has that much room the bytes are written with a local cursor
+     * and no per-byte bounds/flush check.
+     */
+    private void writeUtf8(String s, int n) throws IOException {
+        int len = s.length();
+        int p = offset;
+        if (end - p >= n) {
+            byte[] b = buffer;
+            int i = 0;
+            // ASCII run: the common case is one byte per char.
+            for (; i < len; i++) {
+                char c = s.charAt(i);
+                if (c >= 0x80) {
+                    break;
+                }
+                b[p++] = (byte) c;
+            }
+            for (; i < len; i++) {
+                char c = s.charAt(i);
+                if (c < 0x80) {
+                    b[p++] = (byte) c;
+                } else if (c < 0x800) {
+                    b[p++] = (byte) (0xC0 | (c >> 6));
+                    b[p++] = (byte) (0x80 | (c & 0x3F));
+                } else if (Character.isHighSurrogate(c) && i + 1 < len
+                        && Character.isLowSurrogate(s.charAt(i + 1))) {
+                    int cp = Character.toCodePoint(c, s.charAt(++i));
+                    b[p++] = (byte) (0xF0 | (cp >> 18));
+                    b[p++] = (byte) (0x80 | ((cp >> 12) & 0x3F));
+                    b[p++] = (byte) (0x80 | ((cp >> 6) & 0x3F));
+                    b[p++] = (byte) (0x80 | (cp & 0x3F));
+                } else if (Character.isSurrogate(c)) {
+                    b[p++] = '?';
+                } else {
+                    b[p++] = (byte) (0xE0 | (c >> 12));
+                    b[p++] = (byte) (0x80 | ((c >> 6) & 0x3F));
+                    b[p++] = (byte) (0x80 | (c & 0x3F));
+                }
+            }
+            offset = p;
+            return;
+        }
+        writeUtf8Slow(s);
+    }
+
+    /** Buffer-spanning UTF-8 write: per-byte pushes that can flush mid-string. */
+    private void writeUtf8Slow(String s) throws IOException {
         int len = s.length();
         for (int i = 0; i < len; i++) {
             char c = s.charAt(i);
@@ -463,9 +523,26 @@ public final class OStream {
      */
     public void writeArrayUnsigned(int id, byte[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.length);
-        for (byte e : data) {
-            writeVarint(e & 0xFFL);
+        byte[] b = buffer;
+        int p = offset;
+        int e = end;
+        for (byte elem : data) {
+            long v = elem & 0xFFL;
+            if (e - p < 10) {
+                offset = p;
+                writeVarintSlow(v);
+                b = buffer;
+                p = offset;
+                e = end;
+                continue;
+            }
+            while ((v & ~0x7FL) != 0) {
+                b[p++] = (byte) ((v & 0x7F) | 0x80);
+                v >>>= 7;
+            }
+            b[p++] = (byte) v;
         }
+        offset = p;
     }
 
     /**
@@ -477,9 +554,26 @@ public final class OStream {
      */
     public void writeArrayUnsigned(int id, short[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.length);
-        for (short e : data) {
-            writeVarint(e & 0xFFFFL);
+        byte[] b = buffer;
+        int p = offset;
+        int e = end;
+        for (short elem : data) {
+            long v = elem & 0xFFFFL;
+            if (e - p < 10) {
+                offset = p;
+                writeVarintSlow(v);
+                b = buffer;
+                p = offset;
+                e = end;
+                continue;
+            }
+            while ((v & ~0x7FL) != 0) {
+                b[p++] = (byte) ((v & 0x7F) | 0x80);
+                v >>>= 7;
+            }
+            b[p++] = (byte) v;
         }
+        offset = p;
     }
 
     /**
@@ -554,9 +648,26 @@ public final class OStream {
      */
     public void writeArraySigned(int id, byte[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_SIGNED, data.length);
-        for (byte e : data) {
-            writeVarint(zigzagEncode(e));
+        byte[] b = buffer;
+        int p = offset;
+        int e = end;
+        for (byte elem : data) {
+            long v = zigzagEncode(elem);
+            if (e - p < 10) {
+                offset = p;
+                writeVarintSlow(v);
+                b = buffer;
+                p = offset;
+                e = end;
+                continue;
+            }
+            while ((v & ~0x7FL) != 0) {
+                b[p++] = (byte) ((v & 0x7F) | 0x80);
+                v >>>= 7;
+            }
+            b[p++] = (byte) v;
         }
+        offset = p;
     }
 
     /**
@@ -568,9 +679,26 @@ public final class OStream {
      */
     public void writeArraySigned(int id, short[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_SIGNED, data.length);
-        for (short e : data) {
-            writeVarint(zigzagEncode(e));
+        byte[] b = buffer;
+        int p = offset;
+        int e = end;
+        for (short elem : data) {
+            long v = zigzagEncode(elem);
+            if (e - p < 10) {
+                offset = p;
+                writeVarintSlow(v);
+                b = buffer;
+                p = offset;
+                e = end;
+                continue;
+            }
+            while ((v & ~0x7FL) != 0) {
+                b[p++] = (byte) ((v & 0x7F) | 0x80);
+                v >>>= 7;
+            }
+            b[p++] = (byte) v;
         }
+        offset = p;
     }
 
     /**
