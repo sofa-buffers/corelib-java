@@ -35,7 +35,7 @@ jobs:
         run: mvn -B -DskipTests javadoc:javadoc
 
       - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
         with:
           # Auto-enable Pages (Actions source) so no manual repo setting is needed.
           enablement: true
