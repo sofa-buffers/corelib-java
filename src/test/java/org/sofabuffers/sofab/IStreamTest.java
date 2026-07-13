@@ -6,6 +6,7 @@
  */
 package org.sofabuffers.sofab;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -125,5 +126,95 @@ class IStreamTest {
         // fixlen header: id 0, fp32 subtype but length 5 (must be 4).
         SofabException ex = assertThrows(SofabException.class, () -> decode(bytes(0x02, 0x28)));
         assertEquals(SofabError.INVALID_MSG, ex.error());
+    }
+
+    // --- three-valued outcome (MESSAGE_SPEC §7): COMPLETE / INCOMPLETE / INVALID -
+
+    /** Feed a whole buffer, then report the terminal decode status. */
+    private static DecodeStatus statusOf(byte[] data) throws SofabException {
+        IStream is = new IStream();
+        is.feed(data, new Visitor() { });
+        return is.status();
+    }
+
+    @Test
+    void completeMessageReportsComplete() throws SofabException {
+        // A full unsigned scalar ends exactly at a field boundary.
+        assertEquals(DecodeStatus.COMPLETE, statusOf(bytes(0x00, 0x2A)));
+        // A balanced nested sequence with trailing fields is also COMPLETE.
+        assertEquals(
+                DecodeStatus.COMPLETE,
+                statusOf(bytes(0x00, 0x2A, 0x0E, 0x00, 0x2A, 0x11, 0x53, 0x07, 0x11, 0x53)));
+    }
+
+    @Test
+    void loneContinuationByteIsIncompleteNotComplete() throws SofabException {
+        // A lone 0x80 is a varint with the continuation bit set and no terminating
+        // byte: the field header never finished. It is NOT malformed (more bytes
+        // could complete it) and NOT a clean boundary — it must read as INCOMPLETE,
+        // distinct from a normal COMPLETE return.
+        IStream is = new IStream();
+        is.feed(bytes(0x80), new Visitor() { }); // returns normally, no throw
+        assertEquals(DecodeStatus.INCOMPLETE, is.status());
+    }
+
+    @Test
+    void loneContinuationByteDoesNotThrow() {
+        // Reinforce: a partial varint is not a SofabException (that is reserved for
+        // malformed input). Feeding it must complete without throwing.
+        assertDoesNotThrow(() -> new IStream().feed(bytes(0x80), new Visitor() { }));
+    }
+
+    @Test
+    void truncatedValueIsIncomplete() throws SofabException {
+        // Unsigned field header (0x00) with a value varint whose continuation bit is
+        // set but the following byte never arrives: ended inside the value.
+        assertEquals(DecodeStatus.INCOMPLETE, statusOf(bytes(0x00, 0x80)));
+    }
+
+    @Test
+    void openSequenceIsIncomplete() throws SofabException {
+        // A message that opens a sequence (0x06 = id 0, SEQUENCE_START) and then
+        // truncates before the matching end leaves depth != 0. Today this is
+        // silently accepted; it must now read as INCOMPLETE (an unclosed sequence),
+        // without throwing.
+        assertEquals(DecodeStatus.INCOMPLETE, statusOf(bytes(0x06)));
+        // Even with a complete inner field, an unclosed sequence is still INCOMPLETE.
+        assertEquals(DecodeStatus.INCOMPLETE, statusOf(bytes(0x06, 0x00, 0x2A)));
+    }
+
+    @Test
+    void truncatedArrayIsIncomplete() throws SofabException {
+        // Unsigned array (0x03) with count 3 but only two elements delivered: the
+        // array still has an element pending, so the decoder is mid-message.
+        assertEquals(DecodeStatus.INCOMPLETE, statusOf(bytes(0x03, 0x03, 0x01, 0x02)));
+    }
+
+    @Test
+    void truncatedStringPayloadIsIncomplete() throws SofabException {
+        // fixlen string (0x02), length 5 (header 0x2A), but only 3 payload bytes:
+        // the declared payload is short, so the field never finished.
+        assertEquals(DecodeStatus.INCOMPLETE, statusOf(bytes(0x02, 0x2A, 0x48, 0x65, 0x6C)));
+    }
+
+    @Test
+    void oversizeVarintIsInvalidNotIncomplete() {
+        // A varint longer than 64 bits is malformed regardless of what follows: it
+        // must throw INVALID_MSG, distinct from the non-throwing INCOMPLETE outcome.
+        byte[] bad = bytes(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80);
+        SofabException ex = assertThrows(SofabException.class, () -> statusOf(bad));
+        assertEquals(SofabError.INVALID_MSG, ex.error());
+    }
+
+    @Test
+    void statusIsAPureAccessor() throws SofabException {
+        // status() must not mutate decoder state: calling it repeatedly, and before
+        // more bytes arrive, is stable and lets a resumed feed still complete.
+        IStream is = new IStream();
+        is.feed(bytes(0x00), new Visitor() { }); // field header only, value pending
+        assertEquals(DecodeStatus.INCOMPLETE, is.status());
+        assertEquals(DecodeStatus.INCOMPLETE, is.status());
+        is.feed(bytes(0x2A), new Visitor() { }); // value arrives; message completes
+        assertEquals(DecodeStatus.COMPLETE, is.status());
     }
 }

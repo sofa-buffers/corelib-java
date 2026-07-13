@@ -43,6 +43,17 @@ import static org.sofabuffers.sofab.WireFormat.zigzagDecode;
  * with {@link Visitor#arrayBegin} and then delivered through the scalar / float
  * callbacks.
  *
+ * <p><b>Three-valued outcome (MESSAGE_SPEC §7).</b> Malformed bytes throw a
+ * {@link SofabException} with {@link SofabError#INVALID_MSG} from {@code feed}.
+ * Running out of bytes mid-field is <em>not</em> an error: {@code feed} suspends
+ * and returns normally, and a subsequent {@code feed} resumes it. To tell a
+ * message that is <em>complete</em> from one that was <em>truncated</em>, call
+ * {@link #status()} after the final {@code feed}: it returns
+ * {@link DecodeStatus#COMPLETE} at a clean field boundary or
+ * {@link DecodeStatus#INCOMPLETE} if the last bytes ended inside a field or with
+ * an open (unclosed) sequence. {@code status()} is a pure, non-throwing accessor
+ * — there is no required finish/finalize step; the caller owns end-of-input.
+ *
  * <p>This class is not thread-safe; decode one message from one thread. Reuse an
  * instance for a new message only after the previous one is fully consumed (or
  * by constructing a fresh {@code IStream}).
@@ -55,7 +66,11 @@ import static org.sofabuffers.sofab.WireFormat.zigzagDecode;
  *     public void signed(int id, long v)   { if (id == 2) b = v; }
  * }
  * Sink sink = new Sink();
- * new IStream().feed(buf, sink);
+ * IStream is = new IStream();
+ * is.feed(buf, sink);
+ * if (is.status() == DecodeStatus.INCOMPLETE) {
+ *     // buf ended mid-message; wait for more bytes (or treat as truncation).
+ * }
  * }</pre>
  */
 public final class IStream {
@@ -95,6 +110,38 @@ public final class IStream {
 
     /** Create a fresh decoder ready to accept a new message. */
     public IStream() {
+    }
+
+    /**
+     * Report whether the bytes fed so far end exactly at a field boundary. Call
+     * after the final {@link #feed}: returns {@link DecodeStatus#COMPLETE} when the
+     * decoder is at a clean field boundary with no open sequence, or
+     * {@link DecodeStatus#INCOMPLETE} when the last bytes ended inside a field — a
+     * partial varint (field header or value), a fixlen/array payload shorter than
+     * declared, an array with elements still pending — or with an open (unclosed)
+     * nested sequence ({@code depth != 0}).
+     *
+     * <p>Per the finish-less spec (MESSAGE_SPEC §7) this is a pure accessor: it
+     * never throws, never mutates decoder state, and never promotes an incomplete
+     * decode to an error. The caller owns end-of-input and decides whether a
+     * trailing {@code INCOMPLETE} is a truncation it cares about. A <em>malformed</em>
+     * message has already thrown {@link SofabError#INVALID_MSG} from {@link #feed},
+     * so this method returns only {@link DecodeStatus#COMPLETE} or
+     * {@link DecodeStatus#INCOMPLETE}, never {@link DecodeStatus#INVALID}.
+     *
+     * @return {@link DecodeStatus#COMPLETE} at a clean boundary, otherwise
+     *         {@link DecodeStatus#INCOMPLETE}
+     */
+    public DecodeStatus status() {
+        // COMPLETE only at a true field boundary: no partial field header varint
+        // (varintShift == 0 while IDLE), no in-progress value/payload/array element
+        // (state == IDLE covers the resumable machine and mid-array between
+        // elements), and every opened sequence closed (depth == 0). Anything else
+        // means the bytes ended inside a field or an open sequence — INCOMPLETE.
+        if (state == State.IDLE && varintShift == 0 && depth == 0) {
+            return DecodeStatus.COMPLETE;
+        }
+        return DecodeStatus.INCOMPLETE;
     }
 
     /**
