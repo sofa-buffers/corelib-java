@@ -56,7 +56,7 @@ is the package `org.sofabuffers.sofab`.
 | No per-field allocation | State lives in caller-provided buffers plus small `OStream` / `IStream` objects. Scalars stay primitive (`long` / `double`) — no autoboxing on the hot path. |
 | No reflection, no runtime codegen | Pure method calls; the decoder pushes to a `Visitor` interface. Suitable for GraalVM native-image and locked-down runtimes. |
 | Streaming **out** | `OStream` writes into a small caller buffer and invokes a `FlushSink` whenever it fills, so a message can exceed the buffer — and even RAM. |
-| Streaming **in** | `IStream` accepts arbitrarily small chunks; a message may split across `feed` calls at any byte boundary, and large string / blob payloads arrive in pieces. |
+| Streaming **in** | `IStream` accepts arbitrarily small chunks; a message may split across `feed` calls at any byte boundary, and large string / blob payloads arrive in pieces. Malformed bytes throw `SofabException` (`INVALID_MSG`); running out of bytes mid-field is **not** an error — `feed` suspends and resumes on the next chunk. Call `status()` after the final `feed` to tell a `COMPLETE` message from a truncated `INCOMPLETE` one (MESSAGE_SPEC §7); it never throws and needs no finish/finalize step. |
 | Reserve-offset | `new OStream(buf, offset)` leaves room at the front for a lower-layer protocol header, saving a copy. |
 | Explicit endianness | IEEE-754 values are written / read little-endian with explicit bit shifts, so behaviour is identical on every JVM. |
 | Generated-code friendly | Every `Visitor` method has a default no-op, so sinks override only what they need. |
