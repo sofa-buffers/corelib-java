@@ -502,6 +502,45 @@ public final class OStream {
     // --- array writers ------------------------------------------------------
 
     /**
+     * Minimum element count for a wide-integer array ({@code int[]} / {@code long[]})
+     * to take the check-free bulk encode path. Below this the per-element streaming
+     * loop is used: it is already cheap for a handful of elements, and keeping the
+     * bulk branch (and its {@link #putVarint} reference) out of the method lets the
+     * JIT inline the small array writers and elide short-lived argument arrays.
+     */
+    private static final int BULK_MIN = 16;
+
+    /**
+     * Emit {@code v} as a base-128 varint into {@code b} at {@code p}, returning the
+     * next write position. The caller guarantees at least ten bytes of room
+     * ({@code end - p >= 10}). Fully unrolled (the mirror of the decoder's unrolled
+     * reader): the constant offsets from {@code p} let the JIT hoist a single range
+     * check for the whole ten-byte window, and the straight-line form drops the
+     * per-byte loop-branch/shift-counter overhead of the general {@code while} form.
+     */
+    private static int putVarint(byte[] b, int p, long v) {
+        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
+        b[p++] = (byte) (v | 0x80); v >>>= 7;
+        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
+        b[p++] = (byte) (v | 0x80); v >>>= 7;
+        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
+        b[p++] = (byte) (v | 0x80); v >>>= 7;
+        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
+        b[p++] = (byte) (v | 0x80); v >>>= 7;
+        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
+        b[p++] = (byte) (v | 0x80); v >>>= 7;
+        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
+        b[p++] = (byte) (v | 0x80); v >>>= 7;
+        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
+        b[p++] = (byte) (v | 0x80); v >>>= 7;
+        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
+        b[p++] = (byte) (v | 0x80); v >>>= 7;
+        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
+        b[p++] = (byte) (v | 0x80); v >>>= 7;
+        b[p] = (byte) v; return p + 1;
+    }
+
+    /**
      * Write an array field header (id header then element count). A zero count is
      * valid (§4.7) and yields exactly {@code [ header ][ count = 0 ]}; only a
      * negative count is rejected.
@@ -587,6 +626,13 @@ public final class OStream {
         writeArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.length);
         byte[] b = buffer;
         int p = offset;
+        if (data.length >= BULK_MIN && (long) end - p >= (long) data.length * 10) {
+            for (int elem : data) {
+                p = putVarint(b, p, elem & 0xFFFFFFFFL);
+            }
+            offset = p;
+            return;
+        }
         int e = end;
         for (int elem : data) {
             long v = elem & 0xFFFFFFFFL;
@@ -619,6 +665,16 @@ public final class OStream {
         writeArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.length);
         byte[] b = buffer;
         int p = offset;
+        if (data.length >= BULK_MIN && (long) end - p >= (long) data.length * 10) {
+            // The whole array's worst case (10 bytes/element) fits the buffer, so
+            // no element can overflow: run a tight loop with no per-element room
+            // check or flush test.
+            for (long elem : data) {
+                p = putVarint(b, p, elem);
+            }
+            offset = p;
+            return;
+        }
         int e = end;
         for (long elem : data) {
             long v = elem;
@@ -712,6 +768,13 @@ public final class OStream {
         writeArrayHeader(id, T_VARINTARRAY_SIGNED, data.length);
         byte[] b = buffer;
         int p = offset;
+        if (data.length >= BULK_MIN && (long) end - p >= (long) data.length * 10) {
+            for (int elem : data) {
+                p = putVarint(b, p, zigzagEncode(elem));
+            }
+            offset = p;
+            return;
+        }
         int e = end;
         for (int elem : data) {
             long v = zigzagEncode(elem);
@@ -743,6 +806,13 @@ public final class OStream {
         writeArrayHeader(id, T_VARINTARRAY_SIGNED, data.length);
         byte[] b = buffer;
         int p = offset;
+        if (data.length >= BULK_MIN && (long) end - p >= (long) data.length * 10) {
+            for (long elem : data) {
+                p = putVarint(b, p, zigzagEncode(elem));
+            }
+            offset = p;
+            return;
+        }
         int e = end;
         for (long elem : data) {
             long v = zigzagEncode(elem);
