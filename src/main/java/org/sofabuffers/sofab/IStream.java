@@ -429,24 +429,38 @@ public final class IStream {
         // straight from memory each time would add a load/store to every element.
         int remaining = arrayRemaining;
         final int fieldId = id;
+        final int safe = end - 10; // last start position with a full varint's room
         while (remaining > 0) {
             long val;
-            if (end - p >= 10) {
+            if (p <= safe) {
                 // Bounds-check-free element decode: room for a max-length varint
-                // is guaranteed, continuation flagged by the raw byte's sign bit.
+                // is guaranteed. Fully unrolled (protobuf readRawVarint64 style):
+                // reads at constant offsets from p let the JIT hoist a single
+                // range check for the whole 10-byte window, and the straight-line
+                // form drops the per-byte shift-counter/loop-branch overhead.
                 int b = data[p++];
                 val = b & 0x7F;
                 if (b < 0) {
-                    int vs = 7;
-                    do {
-                        b = data[p++];
-                        val |= ((long) (b & 0x7F)) << vs;
-                        vs += 7;
-                    } while (b < 0 && vs < VALUE_BITS);
+                    b = data[p++]; val |= (long) (b & 0x7F) << 7;
+                    if (b < 0) {
+                    b = data[p++]; val |= (long) (b & 0x7F) << 14;
+                    if (b < 0) {
+                    b = data[p++]; val |= (long) (b & 0x7F) << 21;
+                    if (b < 0) {
+                    b = data[p++]; val |= (long) (b & 0x7F) << 28;
+                    if (b < 0) {
+                    b = data[p++]; val |= (long) (b & 0x7F) << 35;
+                    if (b < 0) {
+                    b = data[p++]; val |= (long) (b & 0x7F) << 42;
+                    if (b < 0) {
+                    b = data[p++]; val |= (long) (b & 0x7F) << 49;
+                    if (b < 0) {
+                    b = data[p++]; val |= (long) (b & 0x7F) << 56;
+                    if (b < 0) {
+                    b = data[p++]; val |= (long) (b & 0x7F) << 63;
                     if (b < 0) {
                         throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
-                    }
-                }
+                    }}}}}}}}}}
             } else {
                 val = 0;
                 int vs = 0;
