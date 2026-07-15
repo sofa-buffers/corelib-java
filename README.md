@@ -25,6 +25,7 @@ driven by **generated code**: a schema-driven generator emits one class per mess
 plus marshal / unmarshal methods that call the primitives here. Decoding uses the
 **visitor pattern**, so a generated message is typically a single `switch` over the
 field id. The wire format is specified language-neutrally in the
+[SofaBuffers documentation](https://github.com/sofa-buffers/documentation).
 
 ### Package name
 
@@ -237,3 +238,4 @@ mvn -q compile exec:java -Dexec.mainClass=org.sofabuffers.sofab.bench.Bench  # t
 under an external counter such as `perf stat -e instructions:u …` for a
 CPU-speed-independent number). `Bench` reports encode / decode throughput in MB/s
 over a ~1 s CPU-time loop. The exact workloads and output grammar are specified in
+the [SofaBuffers documentation](https://github.com/sofa-buffers/documentation).
