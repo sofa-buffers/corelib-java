@@ -233,6 +233,13 @@ public final class IStream {
                 int shift = 7;
                 do {
                     b = data[p++];
+                    // Reject an overlong (>64-bit) varint: a terminating byte whose
+                    // payload bits would spill past bit 63 is malformed, not truncated
+                    // (MESSAGE_SPEC §4.1/§6.3).
+                    int room = VALUE_BITS - shift;
+                    if (room < 7 && ((b & 0x7F) >>> room) != 0) {
+                        throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+                    }
                     header |= ((long) (b & 0x7F)) << shift;
                     shift += 7;
                 } while (b < 0 && shift < VALUE_BITS);
@@ -252,6 +259,10 @@ public final class IStream {
                     return i + 1;
                 }
                 int b = data[p++] & 0xFF;
+                int room = VALUE_BITS - shift;
+                if (room < 7 && ((b & 0x7F) >>> room) != 0) {
+                    throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+                }
                 header |= ((long) (b & 0x7F)) << shift;
                 shift += 7;
                 if ((b & 0x80) == 0) {
@@ -297,6 +308,11 @@ public final class IStream {
                         int vs = 7;
                         do {
                             b = data[q++];
+                            // Reject an overlong (>64-bit) varint (§4.1/§6.3).
+                            int room = VALUE_BITS - vs;
+                            if (room < 7 && ((b & 0x7F) >>> room) != 0) {
+                                throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+                            }
                             val |= ((long) (b & 0x7F)) << vs;
                             vs += 7;
                         } while (b < 0 && vs < VALUE_BITS);
@@ -315,6 +331,10 @@ public final class IStream {
                             return p;
                         }
                         int b = data[q++] & 0xFF;
+                        int room = VALUE_BITS - vs;
+                        if (room < 7 && ((b & 0x7F) >>> room) != 0) {
+                            throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+                        }
                         val |= ((long) (b & 0x7F)) << vs;
                         vs += 7;
                         if ((b & 0x80) == 0) {
@@ -359,6 +379,10 @@ public final class IStream {
                 return i;
             }
             int b = data[p++] & 0xFF;
+            int room = VALUE_BITS - shift;
+            if (room < 7 && ((b & 0x7F) >>> room) != 0) {
+                throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+            }
             fh |= ((long) (b & 0x7F)) << shift;
             shift += 7;
             if ((b & 0x80) == 0) {
@@ -457,7 +481,13 @@ public final class IStream {
                     if (b < 0) {
                     b = data[p++]; val |= (long) (b & 0x7F) << 56;
                     if (b < 0) {
-                    b = data[p++]; val |= (long) (b & 0x7F) << 63;
+                    b = data[p++];
+                    // 10th byte: only bit 0 (value bit 63) may be set; higher payload
+                    // bits are an overlong (>64-bit) varint, not truncation (§4.1/§6.3).
+                    if (((b & 0x7F) >>> 1) != 0) {
+                        throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+                    }
+                    val |= (long) (b & 0x7F) << 63;
                     if (b < 0) {
                         throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
                     }}}}}}}}}}
@@ -468,6 +498,10 @@ public final class IStream {
                 boolean complete = false;
                 while (q < end) {
                     int b = data[q++] & 0xFF;
+                    int room = VALUE_BITS - vs;
+                    if (room < 7 && ((b & 0x7F) >>> room) != 0) {
+                        throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+                    }
                     val |= ((long) (b & 0x7F)) << vs;
                     vs += 7;
                     if ((b & 0x80) == 0) {
@@ -519,6 +553,10 @@ public final class IStream {
                 return lenStart;
             }
             int b = data[p++] & 0xFF;
+            int room = VALUE_BITS - shift;
+            if (room < 7 && ((b & 0x7F) >>> room) != 0) {
+                throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+            }
             fh |= ((long) (b & 0x7F)) << shift;
             shift += 7;
             if ((b & 0x80) == 0) {
@@ -593,6 +631,10 @@ public final class IStream {
                 return -1;
             }
             int b = data[p++] & 0xFF;
+            int room = VALUE_BITS - shift;
+            if (room < 7 && ((b & 0x7F) >>> room) != 0) {
+                throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+            }
             count |= ((long) (b & 0x7F)) << shift;
             shift += 7;
             if ((b & 0x80) == 0) {
@@ -669,6 +711,14 @@ public final class IStream {
      * @throws SofabException if the varint is longer than the value type allows
      */
     private boolean varintPush(int b) throws SofabException {
+        // Reject an overlong (>64-bit) varint: payload bits that would spill past
+        // bit 63 are malformed, not silently truncated (MESSAGE_SPEC §4.1/§6.3).
+        int room = VALUE_BITS - varintShift;
+        if (room < 7 && ((b & 0x7F) >>> room) != 0) {
+            varintValue = 0;
+            varintShift = 0;
+            throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
+        }
         varintValue |= ((long) (b & 0x7F)) << varintShift;
         varintShift += 7;
 
