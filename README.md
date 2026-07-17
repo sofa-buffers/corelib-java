@@ -200,7 +200,14 @@ throughout, with state in caller-provided arrays plus a small fixed object.
   of the *same* buffer — so a message can exceed the buffer or RAM; with no sink, a
   full buffer raises `BUFFER_FULL`. The sink's array is reused after the call
   returns, so a sink that keeps the bytes must copy them. (`writeString` encodes
-  UTF-8 **directly into the buffer**, with no intermediate `byte[]`.)
+  UTF-8 **directly into the buffer**, with no intermediate `byte[]`.) String
+  encoding is **always strict** UTF-8 (MESSAGE_SPEC §8): a `String` is a Unicode
+  string type, so the only value it cannot represent as well-formed UTF-8 is an
+  unpaired UTF-16 surrogate; `writeString` rejects such a string with
+  `SofabException` (`ARGUMENT`) **before** emitting any bytes, never lossily
+  substituting a replacement character. There is no strict mode to toggle. On the
+  decode side the strict-UTF-8 check lives in generated code, which materializes
+  the `String` with a REPORTing `CharsetDecoder` that raises `INVALID_MSG`.
 - **Decode (`IStream` + `Visitor`).** `feed` runs a cursor over the caller's input
   `byte[]`, **aliasing** it. Scalars and floats are passed **by value** (`long` /
   `double`); strings and blobs are handed to the visitor as a **window** (`data`,
