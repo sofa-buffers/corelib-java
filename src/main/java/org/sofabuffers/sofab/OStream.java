@@ -358,8 +358,17 @@ public final class OStream {
     /**
      * Write a string field (raw UTF-8 bytes, no NUL on the wire).
      *
+     * <p>Encoding is <b>always strict</b> UTF-8 (MESSAGE_SPEC §8): a {@code String}
+     * is a Unicode string type, so the only value it can hold that is not
+     * representable as well-formed UTF-8 is an unpaired UTF-16 surrogate. Such a
+     * string is rejected with {@link SofabError#ARGUMENT} <em>before</em> any bytes
+     * are written, rather than being silently lossily replaced. There is no strict
+     * mode to toggle — for a Unicode string type the check is unconditional.
+     *
      * @param id   field id
      * @param text string value
+     * @throws SofabException with {@link SofabError#ARGUMENT} if {@code text}
+     *         contains an unpaired surrogate (invalid UTF-8)
      * @throws IOException on buffer overflow or sink failure
      */
     public void writeString(int id, String text) throws IOException {
@@ -372,8 +381,17 @@ public final class OStream {
         writeUtf8(text, n);
     }
 
-    /** Exact UTF-8 byte length, matching {@link #writeUtf8} (malformed surrogate -&gt; '?'). */
-    private static int utf8Length(String s) {
+    /**
+     * Exact UTF-8 byte length, matching {@link #writeUtf8}. Doubles as the strict
+     * UTF-8 validation pass: {@code String} is a Unicode string type, so the only
+     * way it can fail to encode to well-formed UTF-8 is an unpaired UTF-16
+     * surrogate (MESSAGE_SPEC §8: strings are always strict UTF-8). Running this
+     * before {@link #writeString} emits any bytes means an invalid string is
+     * rejected without producing partial wire output.
+     *
+     * @throws SofabException with {@link SofabError#ARGUMENT} on an unpaired surrogate
+     */
+    private static int utf8Length(String s) throws SofabException {
         int len = s.length();
         // ASCII prefix scan: one compare per char, no per-char byte accounting.
         int i = 0;
@@ -392,7 +410,10 @@ public final class OStream {
                 bytes += 4;
                 i++;
             } else if (Character.isSurrogate(c)) {
-                bytes += 1; // unpaired surrogate -> replacement '?'
+                throw new SofabException(SofabError.ARGUMENT,
+                        "invalid UTF-8: unpaired surrogate U+"
+                                + Integer.toHexString(c).toUpperCase(java.util.Locale.ROOT)
+                                + " at index " + i);
             } else {
                 bytes += 3;
             }
@@ -401,10 +422,12 @@ public final class OStream {
     }
 
     /**
-     * Emit {@code s} as UTF-8, matching {@code String.getBytes(UTF_8)} byte-for-byte.
-     * {@code n} is the exact byte length already measured by {@link #utf8Length};
-     * when the buffer has that much room the bytes are written with a local cursor
-     * and no per-byte bounds/flush check.
+     * Emit {@code s} as strict, well-formed UTF-8. {@code n} is the exact byte
+     * length already measured by {@link #utf8Length}, which also rejected any
+     * unpaired surrogate, so this pass never encounters one; the surrogate branch
+     * throws defensively rather than emitting a replacement byte. When the buffer
+     * has room for {@code n} bytes they are written with a local cursor and no
+     * per-byte bounds/flush check.
      */
     private void writeUtf8(String s, int n) throws IOException {
         int len = s.length();
@@ -435,7 +458,8 @@ public final class OStream {
                     b[p++] = (byte) (0x80 | ((cp >> 6) & 0x3F));
                     b[p++] = (byte) (0x80 | (cp & 0x3F));
                 } else if (Character.isSurrogate(c)) {
-                    b[p++] = '?';
+                    throw new SofabException(SofabError.ARGUMENT,
+                            "invalid UTF-8: unpaired surrogate");
                 } else {
                     b[p++] = (byte) (0xE0 | (c >> 12));
                     b[p++] = (byte) (0x80 | ((c >> 6) & 0x3F));
@@ -466,7 +490,8 @@ public final class OStream {
                 pushByte(0x80 | ((cp >> 6) & 0x3F));
                 pushByte(0x80 | (cp & 0x3F));
             } else if (Character.isSurrogate(c)) {
-                pushByte('?');
+                throw new SofabException(SofabError.ARGUMENT,
+                        "invalid UTF-8: unpaired surrogate");
             } else {
                 pushByte(0xE0 | (c >> 12));
                 pushByte(0x80 | ((c >> 6) & 0x3F));
