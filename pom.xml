@@ -7,7 +7,7 @@
   <groupId>org.sofabuffers</groupId>
   <!-- Registry/artifact coordinate is org.sofabuffers:corelib (§6); the Java namespace stays org.sofabuffers.sofab. -->
   <artifactId>corelib</artifactId>
-  <version>0.1.0</version>
+  <version>0.8.0</version>
   <packaging>jar</packaging>
 
   <name>SofaBuffers CoreLib (Java)</name>
