@@ -7,7 +7,16 @@
   "runArgs": ["--env-file", "${localWorkspaceFolder}/.devcontainer/.env"],
   "customizations": {
     "vscode": {
-      "extensions": ["vscjava.vscode-java-pack", "vscjava.vscode-gradle", "anthropic.claude-code"]
+      "extensions": ["vscjava.vscode-java-pack", "vscjava.vscode-gradle", "anthropic.claude-code"],
+      // Mirrors the JDKs baked into the image (see Dockerfile JAVA_VERSIONS) so
+      // the Java extension can resolve every CI matrix target, not just default.
+      "settings": {
+        "java.configuration.runtimes": [
+          { "name": "JavaSE-17", "path": "/usr/lib/jvm/temurin-17-jdk-amd64" },
+          { "name": "JavaSE-21", "path": "/usr/lib/jvm/temurin-21-jdk-amd64", "default": true },
+          { "name": "JavaSE-25", "path": "/usr/lib/jvm/temurin-25-jdk-amd64" }
+        ]
+      }
     }
   }
 }
