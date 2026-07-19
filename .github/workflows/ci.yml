@@ -44,7 +44,7 @@ jobs:
       # across runs rather than tracking whichever JDK is newest.
       - name: Upload JaCoCo report
         if: matrix.java == '21'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jacoco-report
           path: target/site/jacoco/jacoco.csv
@@ -64,7 +64,7 @@ jobs:
       # The report was produced by the JDK 21 matrix leg; no JDK or build
       # needed here.
       - name: Download JaCoCo report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: jacoco-report
           path: target/site/jacoco
