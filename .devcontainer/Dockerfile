@@ -1,6 +1,11 @@
 FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+# Every JDK the CI matrix builds against, so any failing leg can be reproduced
+# locally with `JAVA_HOME=/usr/lib/jvm/temurin-<v>-jdk-amd64 mvn verify`.
+# Keep in sync with .github/workflows/ci.yml.
+ARG JAVA_VERSIONS="17 21 25"
+# Default toolchain; matches the leg that produces the coverage badge.
 ARG JAVA_VERSION=21
 ENV JAVA_HOME=/usr/lib/jvm/temurin-${JAVA_VERSION}-jdk-amd64
 ENV PATH=$JAVA_HOME/bin:$PATH
@@ -19,7 +24,10 @@ RUN curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public \
     && echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(. /etc/os-release; echo $VERSION_CODENAME) main" \
        > /etc/apt/sources.list.d/adoptium.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends temurin-${JAVA_VERSION}-jdk maven gradle \
+    && apt-get install -y --no-install-recommends maven gradle \
+       $(for v in ${JAVA_VERSIONS}; do echo "temurin-$v-jdk"; done) \
+    && update-alternatives --set java ${JAVA_HOME}/bin/java \
+    && update-alternatives --set javac ${JAVA_HOME}/bin/javac \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js (LTS) for Claude Code
