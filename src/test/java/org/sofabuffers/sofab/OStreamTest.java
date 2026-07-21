@@ -236,4 +236,36 @@ class OStreamTest {
                 () -> new OStream(new byte[16]).writeSequenceEnd());
         assertEquals(SofabError.USAGE, ex.error());
     }
+
+    /** reset(buffer) returns a used stream to a fresh state: encoding two messages
+     *  through one reused instance must be byte-identical to two fresh streams. */
+    @Test
+    void resetMakesStreamReusable() throws IOException {
+        byte[] buf = new byte[256];
+        OStream os = new OStream(buf);
+        os.writeUnsigned(0, 42);
+        byte[] a = Arrays.copyOf(buf, os.bytesUsed());
+
+        os.reset(buf);
+        os.writeSigned(1, -7);
+        byte[] b = Arrays.copyOf(buf, os.bytesUsed());
+
+        assertArrayEquals(encode(o -> o.writeUnsigned(0, 42)), a);
+        assertArrayEquals(encode(o -> o.writeSigned(1, -7)), b);
+    }
+
+    /** reset(buffer) clears sequence nesting depth left behind by an abandoned
+     *  encode, so the next message starts balanced — a bare writeSequenceEnd after
+     *  reset must be rejected as dangling, proving depth is back to zero. */
+    @Test
+    void resetClearsSequenceDepth() throws IOException {
+        byte[] buf = new byte[256];
+        OStream os = new OStream(buf);
+        os.writeSequenceBegin(3);        // depth -> 1, never closed
+        os.reset(buf);
+        assertEquals(0, os.bytesUsed());
+        SofabException ex = assertThrows(SofabException.class, os::writeSequenceEnd);
+        assertEquals(SofabError.USAGE, ex.error());
+    }
+
 }

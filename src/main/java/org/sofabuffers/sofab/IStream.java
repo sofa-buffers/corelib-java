@@ -113,6 +113,36 @@ public final class IStream {
     }
 
     /**
+     * Return this decoder to its just-constructed state so it can decode another
+     * message. Equivalent to allocating a new {@code IStream}, without the
+     * allocation: a decoder is one small object plus its scalar accumulator, so a
+     * caller decoding many messages in a row (a server loop, the generated
+     * {@code decode} helpers) can hold one instance and reset it per message
+     * instead of letting each decode allocate and immediately discard one.
+     *
+     * <p>Discards any partially decoded field and any open sequence nesting, so it
+     * must not be called mid-message unless that is the intent — after an
+     * {@link SofabError#INVALID_MSG} it is exactly how a stream decoder resynchronises
+     * onto the next message. {@code acc} is not cleared: only its first
+     * {@code accLen} bytes are ever read, and that is zeroed here.
+     */
+    public void reset() {
+        varintValue = 0;
+        varintShift = 0;
+        varintOut = 0;
+        state = State.IDLE;
+        id = 0;
+        arrayKind = ArrayKind.UNSIGNED;
+        arrayRemaining = 0;
+        inArray = false;
+        fixlenType = FixlenType.FP32;
+        fixlenTotal = 0;
+        fixlenRemaining = 0;
+        accLen = 0;
+        depth = 0;
+    }
+
+    /**
      * Report whether the bytes fed so far end exactly at a field boundary. Call
      * after the final {@link #feed}: returns {@link DecodeStatus#COMPLETE} when the
      * decoder is at a clean field boundary with no open sequence, or

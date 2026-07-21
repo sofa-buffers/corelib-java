@@ -217,4 +217,49 @@ class IStreamTest {
         is.feed(bytes(0x2A), new Visitor() { }); // value arrives; message completes
         assertEquals(DecodeStatus.COMPLETE, is.status());
     }
+
+    /** reset() returns a used decoder to a fresh state: reusing one instance across
+     *  two messages must record exactly what two fresh instances would. */
+    @Test
+    void resetMakesDecoderReusable() throws SofabException {
+        byte[] a = bytes(0x00, 0x2A);       // id 0, unsigned 42
+        byte[] b = bytes(0x08, 0x63);       // id 1, unsigned 99
+        RecordingVisitor va = new RecordingVisitor();
+        IStream is = new IStream();
+        is.feed(a, va);
+        is.reset();
+        RecordingVisitor vb = new RecordingVisitor();
+        is.feed(b, vb);
+        assertEquals(decode(a), va.events);
+        assertEquals(decode(b), vb.events);
+    }
+
+    /** reset() discards a half-fed message, so a decoder can resynchronise onto the
+     *  next message after abandoning a partial one. */
+    @Test
+    void resetDiscardsPartialMessage() throws SofabException {
+        IStream is = new IStream();
+        is.feed(bytes(0x00), new RecordingVisitor());   // id/type header, value byte withheld
+        assertEquals(DecodeStatus.INCOMPLETE, is.status());
+        is.reset();
+        RecordingVisitor v = new RecordingVisitor();
+        is.feed(bytes(0x08, 0x63), v);                  // a complete, unrelated message
+        assertEquals(DecodeStatus.COMPLETE, is.status());
+        assertEquals(decode(bytes(0x08, 0x63)), v.events);
+    }
+
+    /** After a malformed message throws INVALID, reset() lets the same instance
+     *  decode a clean message — the stream-decoder resync path. */
+    @Test
+    void resetRecoversAfterInvalid() throws SofabException {
+        IStream is = new IStream();
+        assertThrows(SofabException.class,
+                () -> is.feed(bytes(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80),
+                        new RecordingVisitor()));
+        is.reset();
+        RecordingVisitor v = new RecordingVisitor();
+        is.feed(bytes(0x00, 0x2A), v);
+        assertEquals(decode(bytes(0x00, 0x2A)), v.events);
+    }
+
 }
