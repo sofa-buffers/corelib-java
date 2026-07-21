@@ -593,4 +593,63 @@ class OStreamTest {
         os.flush();
         assertEquals(0x07, buf[0] & 0xFF);
     }
+
+    /** reset(buffer) returns a used stream to a fresh state: encoding two messages
+     *  through one reused instance must be byte-identical to two fresh streams. */
+    @Test
+    void resetMakesStreamReusable() throws IOException {
+        byte[] buf = new byte[256];
+        OStream os = new OStream(buf);
+        os.writeUnsigned(0, 42);
+        byte[] a = Arrays.copyOf(buf, os.bytesUsed());
+
+        os.reset(buf);
+        os.writeSigned(1, -7);
+        byte[] b = Arrays.copyOf(buf, os.bytesUsed());
+
+        assertArrayEquals(encode(o -> o.writeUnsigned(0, 42)), a);
+        assertArrayEquals(encode(o -> o.writeSigned(1, -7)), b);
+    }
+
+    /** reset(buffer) clears sequence nesting depth left behind by an abandoned
+     *  encode. Since an unbalanced end is no longer rejected (#49), depth is
+     *  observed through the other thing it gates — the MAX_DEPTH ceiling: fill it,
+     *  reset, and opening a sequence must be legal again. */
+    @Test
+    void resetClearsSequenceDepth() throws IOException {
+        byte[] buf = new byte[4096];
+        OStream os = new OStream(buf);
+        for (int i = 0; i < Sofab.MAX_DEPTH; i++) {
+            os.writeSequenceBeginLazy(i); // depth -> MAX_DEPTH, never closed
+        }
+        assertThrows(SofabException.class, () -> os.writeSequenceBeginLazy(0));
+
+        os.reset(buf);
+        assertEquals(0, os.bytesUsed());
+        os.writeSequenceBeginLazy(3);
+        os.writeUnsigned(1, 7);
+        os.writeSequenceEnd();
+        assertArrayEquals(
+                encode(o -> {
+                    o.writeSequenceBeginLazy(3);
+                    o.writeUnsigned(1, 7);
+                    o.writeSequenceEnd();
+                }),
+                Arrays.copyOf(buf, os.bytesUsed()));
+    }
+
+    /** reset(buffer) also drops sequence headers still held back by lazy framing
+     *  (MESSAGE_SPEC §2), so an abandoned encode cannot prepend a stale
+     *  `sequence start` to the next message written on the same stream. */
+    @Test
+    void resetClearsHeldBackSequenceHeaders() throws IOException {
+        byte[] buf = new byte[256];
+        OStream os = new OStream(buf);
+        os.writeSequenceBeginLazy(3);    // header held back, never committed
+        os.reset(buf);
+        os.writeUnsigned(1, 42);
+        assertArrayEquals(encode(o -> o.writeUnsigned(1, 42)),
+                Arrays.copyOf(buf, os.bytesUsed()));
+    }
+
 }
