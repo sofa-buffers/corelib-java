@@ -207,11 +207,11 @@ class EncoderOverloadsTest {
     }
 
     @Test
-    void writeSequenceEndWithoutOpenSequenceRejected() {
-        // Empty arrays are now accepted (see tests above); the encoder's remaining
-        // structural guard is an unbalanced sequence end.
-        assertEquals(SofabError.USAGE,
-                assertThrows(SofabException.class, () -> new OStream(new byte[16]).writeSequenceEnd()).error());
+    void writeSequenceEndWithoutOpenSequenceIsNotRejected() throws Exception {
+        // Empty arrays are accepted (see tests above), and so is an unbalanced
+        // sequence end: the encoder has no structural guard left. Producing
+        // malformed bytes on request is allowed; judging them is the decoder's job.
+        new OStream(new byte[16]).writeSequenceEnd();
     }
 
     @Test

@@ -231,9 +231,14 @@ class OStreamTest {
     }
 
     @Test
-    void unbalancedSequenceEndRejected() {
-        SofabException ex = assertThrows(SofabException.class,
-                () -> new OStream(new byte[16]).writeSequenceEnd());
-        assertEquals(SofabError.USAGE, ex.error());
+    void unbalancedSequenceEndIsWrittenNotRejected() throws Exception {
+        // The encoder writes what it is told; an end with no matching begin makes
+        // the *bytes* malformed, which is the decoder's verdict, not the
+        // encoder's. Every other port behaves this way.
+        byte[] buf = new byte[16];
+        OStream os = new OStream(buf);
+        os.writeSequenceEnd();
+        os.flush();
+        assertEquals(0x07, buf[0] & 0xFF);
     }
 }

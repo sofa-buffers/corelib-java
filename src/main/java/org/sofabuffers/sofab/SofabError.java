@@ -18,9 +18,6 @@ public enum SofabError {
     /** Invalid caller argument (e.g. a field id outside {@code 0..ID_MAX}). */
     ARGUMENT,
 
-    /** Invalid API usage (e.g. a decoded value does not fit the requested type). */
-    USAGE,
-
     /** The output buffer is full and no {@link FlushSink} is available. */
     BUFFER_FULL,
 
