@@ -70,7 +70,7 @@ public final class Perf {
         os.writeArrayUnsigned(9, PERF_SAMPLES);
         os.writeArraySigned(10, PERF_DELTAS);
         os.writeArrayFp64(11, PERF_FP64);
-        os.writeSequenceBegin(12);
+        os.writeSequenceBeginLazy(12);
         os.writeUnsigned(1, 99);
         os.writeSigned(2, -7);
         os.writeSequenceEnd();

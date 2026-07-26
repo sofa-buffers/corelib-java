@@ -118,9 +118,9 @@ class RoundTripTest {
     void nestedSequencesBalance() throws IOException {
         Capture c = roundtrip(os -> {
             os.writeUnsigned(1, 1);
-            os.writeSequenceBegin(2);
+            os.writeSequenceBeginLazy(2);
             os.writeUnsigned(1, 2);
-            os.writeSequenceBegin(3);
+            os.writeSequenceBeginLazy(3);
             os.writeUnsigned(1, 3);
             os.writeSequenceEnd();
             os.writeSequenceEnd();

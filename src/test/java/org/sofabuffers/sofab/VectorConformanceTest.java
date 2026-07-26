@@ -175,8 +175,13 @@ class VectorConformanceTest {
             case "string":   os.writeString(id, f.get("value").getAsString()); break;
             case "blob":     os.writeBlob(id, unhex(f.get("value_hex").getAsString())); break;
             case "array":    writeArray(os, id, f.get("element_type").getAsString(), f.getAsJsonArray("values")); break;
-            case "sequence_begin": os.writeSequenceBegin(id); break;
-            case "sequence_end":   os.writeSequenceEnd(); break;
+            // The vectors' `serialized` hex is the DENSE image, which always carries
+            // the frame — including for the three empty-sequence vectors. Replaying
+            // through the raw encoder therefore closes with the frame-keeping form:
+            // writeSequenceEnd() would drop a contentless sequence and those vectors
+            // would encode to nothing (MESSAGE_SPEC §2).
+            case "sequence_begin": os.writeSequenceBeginLazy(id); break;
+            case "sequence_end":   os.writeSequenceEndKeep(); break;
             default: throw new IllegalArgumentException("unknown op " + op);
         }
     }

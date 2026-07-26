@@ -47,7 +47,7 @@ class StateMachineCoverageTest {
         os.writeArraySigned(28, i32);
         os.writeArrayFp32(29, new float[] {1.5f, -2.5f, 3.5f});
         os.writeArrayFp64(30, new double[] {1.25, -2.5, 3.75});
-        os.writeSequenceBegin(31);
+        os.writeSequenceBeginLazy(31);
         os.writeUnsigned(20, 7);
         os.writeSequenceEnd();
         return Arrays.copyOf(buf, os.bytesUsed());

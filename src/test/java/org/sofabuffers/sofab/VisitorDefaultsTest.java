@@ -30,7 +30,7 @@ class VisitorDefaultsTest {
         os.writeArrayUnsigned(8, new int[] {1, 2});
         os.writeArraySigned(9, new int[] {-1, -2});
         os.writeArrayFp64(10, new double[] {1.0, 2.0});
-        os.writeSequenceBegin(11);
+        os.writeSequenceBeginLazy(11);
         os.writeUnsigned(1, 7);
         os.writeSequenceEnd();
         int used = os.bytesUsed();

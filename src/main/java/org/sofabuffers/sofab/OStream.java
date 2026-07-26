@@ -37,6 +37,14 @@ import static org.sofabuffers.sofab.WireFormat.zigzagEncode;
  * the value outright. Raw string / blob payloads are copied in bulk up to each
  * buffer boundary. The wire output is identical regardless of buffer size.
  *
+ * <p>Sequences are framed <b>lazily</b>: {@link #writeSequenceBeginLazy(int)}
+ * holds the header back until the sequence turns out to have content, so a
+ * sequence that receives none is dropped entirely rather than emitted as an empty
+ * frame (MESSAGE_SPEC §2). {@link #writeSequenceEndKeep()} is the closer for the
+ * positions where the frame must survive regardless — a wrapper-array element,
+ * whose presence carries the array's length. Held-back ids are encoder state, not
+ * buffer content, so this never interacts with flushing.
+ *
  * <p>This class is not thread-safe; encode one message from one thread.
  *
  * <h2>Example</h2>
@@ -51,6 +59,16 @@ import static org.sofabuffers.sofab.WireFormat.zigzagEncode;
  */
 public final class OStream {
 
+    /**
+     * How many nested sequence headers can be held back at once (see
+     * {@link #writeSequenceBeginLazy(int)}). A run deeper than this is framed
+     * eagerly: still valid, just not canonical — an all-default sequence nested
+     * deeper than this keeps its empty frame, which a decoder accepts and
+     * normalizes away (MESSAGE_SPEC §2). Sized for real schemas rather than the
+     * format's {@link Sofab#MAX_DEPTH} ceiling so the encoder stays small.
+     */
+    public static final int LAZY_SEQ_DEPTH = 32;
+
     private byte[] buffer;
     private int end;
     private int offset;
@@ -58,6 +76,20 @@ public final class OStream {
 
     /** Number of nested sequences currently open; bounded by {@link Sofab#MAX_DEPTH}. */
     private int depth;
+
+    /**
+     * Ids of the innermost open sequences whose header has not been written yet
+     * (MESSAGE_SPEC §2 lazy framing). Always a contiguous suffix of the open
+     * sequences: writing any field commits the whole run at once, so
+     * {@link #writeSequenceEnd()} can simply pop the last entry.
+     *
+     * <p>Allocated on the first {@link #writeSequenceBeginLazy(int)} so an encoder
+     * that never opens a sequence pays nothing for it.
+     */
+    private int[] pending;
+
+    /** Number of valid entries in {@link #pending}. */
+    private int nPending;
 
     /**
      * Create an encoder over {@code buffer} with no flush sink. Writing past the
@@ -258,12 +290,37 @@ public final class OStream {
         }
     }
 
-    /** Validate {@code id} and write the field header varint {@code (id << 3) | wireType}. */
+    /**
+     * Validate {@code id} and write the field header varint
+     * {@code (id << 3) | wireType}.
+     *
+     * <p>This is the single choke point every field write in this class passes
+     * through — the scalar, fixlen, float, string, blob and both array writers all
+     * compose their header here — so it is also where a held-back sequence run is
+     * committed: the field about to be written is content, which means every
+     * enclosing sequence is non-default and must be framed after all
+     * (MESSAGE_SPEC §2).
+     */
     private void writeIdType(int id, int wireType) throws IOException {
         if (id < 0 || id > ID_MAX) {
             throw new SofabException(SofabError.ARGUMENT, "id " + id);
         }
+        if (nPending != 0 && wireType != T_SEQUENCE_START && wireType != T_SEQUENCE_END) {
+            commitPending();
+        }
         writeVarint(((long) id << 3) | wireType);
+    }
+
+    /**
+     * Write out the held-back sequence headers, outermost first. Runs at most once
+     * per non-default sequence run, never per field.
+     */
+    private void commitPending() throws IOException {
+        int n = nPending;
+        nPending = 0;
+        for (int i = 0; i < n; i++) {
+            writeVarint(((long) pending[i] << 3) | T_SEQUENCE_START);
+        }
     }
 
     // --- scalar writers -----------------------------------------------------
@@ -901,25 +958,66 @@ public final class OStream {
     // --- sequence writers ---------------------------------------------------
 
     /**
-     * Open a nested sequence with the given field {@code id}. Fields written
-     * until the matching {@link #writeSequenceEnd()} belong to the sequence and
-     * form a fresh id scope.
+     * Open a nested sequence with the given field {@code id}, whose header is
+     * <b>held back</b> until the sequence turns out to have content. Fields written
+     * until the matching close belong to the sequence and form a fresh id scope.
+     *
+     * <p>MESSAGE_SPEC §2 omits a sequence-typed field whose value equals its
+     * declared default, and "not one child was written" is exactly that condition —
+     * evaluated per child field, recursively, for free, because the message layer
+     * already omits every child equal to its default. A sequence closed with
+     * nothing in it therefore emits <b>nothing</b> instead of a two-byte empty
+     * frame, and an all-default message becomes the empty byte string.
+     *
+     * <p>The predicate is never a byte image of the object, so struct padding
+     * cannot influence it, and a non-zero nested default is handled by the caller's
+     * ordinary per-field test.
+     *
+     * <p>Held-back ids are encoder <em>state</em>, not buffer content, so a flush
+     * can never split a pending run: an output buffer far smaller than the message
+     * produces exactly the one-shot bytes.
+     *
+     * <p>This is the only way to open a sequence. How it closes decides whether a
+     * contentless one survives: {@link #writeSequenceEnd()} drops it,
+     * {@link #writeSequenceEndKeep()} forces the frame out.
      *
      * @param id field id of the sequence
      * @throws IOException on buffer overflow or sink failure
      * @throws SofabException with {@link SofabError#ARGUMENT} if opening this
-     *         sequence would exceed {@link Sofab#MAX_DEPTH} nesting levels
+     *         sequence would exceed {@link Sofab#MAX_DEPTH} nesting levels, or if
+     *         {@code id} is out of range
      */
-    public void writeSequenceBegin(int id) throws IOException {
+    public void writeSequenceBeginLazy(int id) throws IOException {
         if (depth >= Sofab.MAX_DEPTH) {
             throw new SofabException(SofabError.ARGUMENT, "sequence nesting exceeds MAX_DEPTH");
         }
-        writeIdType(id, T_SEQUENCE_START);
+        if (id < 0 || id > ID_MAX) {
+            throw new SofabException(SofabError.ARGUMENT, "id " + id);
+        }
+        if (pending == null) {
+            pending = new int[LAZY_SEQ_DEPTH];
+        }
+        if (nPending < LAZY_SEQ_DEPTH) {
+            pending[nPending++] = id;
+        } else {
+            // Deeper than the hold-back window: commit the run and frame eagerly,
+            // which keeps "pending is a contiguous suffix of the open sequences"
+            // intact. Valid, just not canonical if this sequence turns out to be
+            // all-default.
+            commitPending();
+            writeVarint(((long) id << 3) | T_SEQUENCE_START);
+        }
         depth++;
     }
 
     /**
-     * Close the most recently opened nested sequence.
+     * Close the most recently opened nested sequence, letting it <b>vanish</b> if
+     * it received no content.
+     *
+     * <p>Use it wherever absence encodes the same value as an empty frame: a
+     * {@code struct}/{@code union} field, and an array field whose declared
+     * {@code default} is the empty collection (MESSAGE_SPEC §2). Where the frame
+     * must be visible, close with {@link #writeSequenceEndKeep()} instead.
      *
      * <p>An end with no matching begin is not rejected here: the encoder writes
      * what it is told and the resulting bytes are then malformed, which is the
@@ -930,6 +1028,52 @@ public final class OStream {
      * @throws IOException on buffer overflow or sink failure
      */
     public void writeSequenceEnd() throws IOException {
+        if (nPending != 0) {
+            // The innermost open sequence is the last held-back one: drop it,
+            // header and end marker both.
+            nPending--;
+            if (depth > 0) {
+                depth--;
+            }
+            return;
+        }
+        writeIdType(0, T_SEQUENCE_END);
+        if (depth > 0) {
+            depth--;
+        }
+    }
+
+    /**
+     * Close the most recently opened nested sequence, <b>keeping</b> its frame even
+     * when it received no content.
+     *
+     * <p>Behaves like a write: it first emits any held-back headers — this frame's
+     * and every enclosing one's — and then the end marker, so an empty sequence
+     * reaches the wire as {@code begin} + {@code end}.
+     *
+     * <p>Required wherever the frame carries information beyond its contents:
+     * <ul>
+     *   <li>a <b>wrapper-array element</b> ({@code struct}/{@code union}/nested
+     *       row): element presence is what carries a dynamic array's length —
+     *       <em>highest present id + 1</em> (MESSAGE_SPEC §5.1) — so dropping an
+     *       all-default element would change the decoded length, not just the
+     *       bytes;</li>
+     *   <li>an array field already known to <b>differ from a non-empty declared
+     *       {@code default}</b>: absence would reconstruct that default, so the
+     *       empty frame is the only encoding of "explicitly empty" (§2, §3).</li>
+     * </ul>
+     *
+     * <p>The two failure directions are not symmetric, which is why this is the
+     * safe choice when in doubt: using it where {@link #writeSequenceEnd()} would
+     * do costs one non-canonical empty frame that a decoder normalizes away, while
+     * the reverse silently changes an array's length.
+     *
+     * @throws IOException on buffer overflow or sink failure
+     */
+    public void writeSequenceEndKeep() throws IOException {
+        if (nPending != 0) {
+            commitPending();
+        }
         writeIdType(0, T_SEQUENCE_END);
         if (depth > 0) {
             depth--;
