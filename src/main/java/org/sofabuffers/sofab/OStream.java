@@ -921,15 +921,18 @@ public final class OStream {
     /**
      * Close the most recently opened nested sequence.
      *
+     * <p>An end with no matching begin is not rejected here: the encoder writes
+     * what it is told and the resulting bytes are then malformed, which is the
+     * decoder's verdict to make. Every other port behaves this way; the depth
+     * counter simply stops at zero so the {@code MAX_DEPTH} check on begin
+     * cannot be fooled by an underflow.
+     *
      * @throws IOException on buffer overflow or sink failure
-     * @throws SofabException with {@link SofabError#USAGE} if there is no open
-     *         sequence to close
      */
     public void writeSequenceEnd() throws IOException {
-        if (depth == 0) {
-            throw new SofabException(SofabError.USAGE, "no open sequence");
-        }
         writeIdType(0, T_SEQUENCE_END);
-        depth--;
+        if (depth > 0) {
+            depth--;
+        }
     }
 }
