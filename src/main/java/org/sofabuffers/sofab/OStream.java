@@ -6,6 +6,7 @@
 package org.sofabuffers.sofab;
 
 import java.io.IOException;
+import java.util.Arrays;
 
 import static org.sofabuffers.sofab.WireFormat.ID_MAX;
 import static org.sofabuffers.sofab.WireFormat.T_FIXLEN;
@@ -38,12 +39,15 @@ import static org.sofabuffers.sofab.WireFormat.zigzagEncode;
  * buffer boundary. The wire output is identical regardless of buffer size.
  *
  * <p>Sequences are framed <b>lazily</b>: {@link #writeSequenceBeginLazy(int)}
- * holds the header back until the sequence turns out to have content, so a
- * sequence that receives none is dropped entirely rather than emitted as an empty
- * frame (MESSAGE_SPEC §2). {@link #writeSequenceEndKeep()} is the closer for the
- * positions where the frame must survive regardless — a wrapper-array element,
- * whose presence carries the array's length. Held-back ids are encoder state, not
- * buffer content, so this never interacts with flushing.
+ * holds the header back until the sequence turns out to have content. A
+ * sequence-typed <b>field</b> that receives none is therefore dropped entirely
+ * rather than emitted as an empty frame (MESSAGE_SPEC §2) — "always framed" is no
+ * longer true for a field. It is still true for a wrapper-array <b>element</b>,
+ * whose presence carries the array's length (§5.1); that position closes with
+ * {@link #writeSequenceEndKeep()}, which forces the frame out. Held-back ids are
+ * encoder state, not buffer content, so this never interacts with flushing, and
+ * the run grows to the full {@link Sofab#MAX_DEPTH} so the output is canonical at
+ * every legal depth.
  *
  * <p>This class is not thread-safe; encode one message from one thread.
  *
@@ -60,14 +64,13 @@ import static org.sofabuffers.sofab.WireFormat.zigzagEncode;
 public final class OStream {
 
     /**
-     * How many nested sequence headers can be held back at once (see
-     * {@link #writeSequenceBeginLazy(int)}). A run deeper than this is framed
-     * eagerly: still valid, just not canonical — an all-default sequence nested
-     * deeper than this keeps its empty frame, which a decoder accepts and
-     * normalizes away (MESSAGE_SPEC §2). Sized for real schemas rather than the
-     * format's {@link Sofab#MAX_DEPTH} ceiling so the encoder stays small.
+     * Initial capacity of the held-back-header run. It is a starting size, not a
+     * limit: the run grows on demand and can reach {@link Sofab#MAX_DEPTH}, which
+     * is what makes this encoder canonical at every legal nesting depth
+     * (CORELIB_PLAN §6, "How deep the hold-back reaches" — only a heap-free
+     * profile may bound the run and frame eagerly beyond it).
      */
-    public static final int LAZY_SEQ_DEPTH = 32;
+    private static final int PENDING_INITIAL = 8;
 
     private byte[] buffer;
     private int end;
@@ -80,11 +83,14 @@ public final class OStream {
     /**
      * Ids of the innermost open sequences whose header has not been written yet
      * (MESSAGE_SPEC §2 lazy framing). Always a contiguous suffix of the open
-     * sequences: writing any field commits the whole run at once, so
-     * {@link #writeSequenceEnd()} can simply pop the last entry.
+     * sequences — every entry is held back, and nothing below it is — so
+     * {@link #writeSequenceEnd()} can simply pop the last entry. Writing any
+     * field commits the whole run at once, and there is no other way to leave it;
+     * the invariant therefore holds by construction.
      *
-     * <p>Allocated on the first {@link #writeSequenceBeginLazy(int)} so an encoder
-     * that never opens a sequence pays nothing for it.
+     * <p>Allocated on the first {@link #writeSequenceBeginLazy(int)} — an encoder
+     * that never opens a sequence pays nothing for it — and grown on demand, so
+     * the hold-back reaches the full {@link Sofab#MAX_DEPTH}.
      */
     private int[] pending;
 
@@ -305,7 +311,14 @@ public final class OStream {
         if (id < 0 || id > ID_MAX) {
             throw new SofabException(SofabError.ARGUMENT, "id " + id);
         }
-        if (nPending != 0 && wireType != T_SEQUENCE_START && wireType != T_SEQUENCE_END) {
+        // No wire-type exemption is needed here. A sequence *header* never passes
+        // through this method — writeSequenceBeginLazy holds it back and
+        // commitPending emits it directly — and both closers settle the run
+        // themselves before they get here (end() returns early when its own header
+        // is still pending; endKeep() commits first), so the end marker only ever
+        // arrives with an empty run. Committing unconditionally is therefore both
+        // exact and the safe behaviour for any future caller.
+        if (nPending != 0) {
             commitPending();
         }
         writeVarint(((long) id << 3) | wireType);
@@ -977,6 +990,11 @@ public final class OStream {
      * can never split a pending run: an output buffer far smaller than the message
      * produces exactly the one-shot bytes.
      *
+     * <p>The hold-back reaches the full {@link Sofab#MAX_DEPTH}: the pending run
+     * grows on demand, so this encoder is canonical at every legal nesting depth.
+     * Bounding the run and framing eagerly beyond the bound is an allowance for
+     * heap-free profiles only (CORELIB_PLAN §6), and the JVM is not one.
+     *
      * <p>This is the only way to open a sequence. How it closes decides whether a
      * contentless one survives: {@link #writeSequenceEnd()} drops it,
      * {@link #writeSequenceEndKeep()} forces the frame out.
@@ -995,18 +1013,16 @@ public final class OStream {
             throw new SofabException(SofabError.ARGUMENT, "id " + id);
         }
         if (pending == null) {
-            pending = new int[LAZY_SEQ_DEPTH];
+            // First hold-back on this stream: an encoder that never opens a
+            // sequence never allocates here at all.
+            pending = new int[PENDING_INITIAL];
+        } else if (nPending == pending.length) {
+            // Grow rather than fall back to eager framing. nPending <= depth <
+            // MAX_DEPTH, so the run can never need more than MAX_DEPTH slots.
+            int grown = Math.min(pending.length * 2, Sofab.MAX_DEPTH);
+            pending = Arrays.copyOf(pending, grown);
         }
-        if (nPending < LAZY_SEQ_DEPTH) {
-            pending[nPending++] = id;
-        } else {
-            // Deeper than the hold-back window: commit the run and frame eagerly,
-            // which keeps "pending is a contiguous suffix of the open sequences"
-            // intact. Valid, just not canonical if this sequence turns out to be
-            // all-default.
-            commitPending();
-            writeVarint(((long) id << 3) | T_SEQUENCE_START);
-        }
+        pending[nPending++] = id;
         depth++;
     }
 

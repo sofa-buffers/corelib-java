@@ -31,6 +31,23 @@ import org.junit.jupiter.api.TestFactory;
 
 class VectorConformanceTest {
 
+    /**
+     * Load the shared vectors.
+     *
+     * <p><b>Which column this repo asserts.</b> Every test here drives the
+     * <em>primitive</em> encoder/decoder against {@code serialized} — the dense
+     * image, the ground truth for the raw wire layer this library implements. The
+     * sibling {@code serialized_sparse} column is deliberately <b>not</b> read, and
+     * that is not a coverage gap: it is the MESSAGE_SPEC §2 sparse-canonical image,
+     * produced by a <em>message</em> layer deciding per field whether a value
+     * equals its declared default. This repo has no message layer and no schema
+     * defaults, so it cannot produce that form and has nothing to compare against.
+     * {@code serialized_sparse} is exercised by the <b>generator's</b> conformance
+     * driver ({@code sofabgen}'s {@code tests/conformance/java/}), which generates
+     * the message classes that own the defaults. The primitive-level half of §2 —
+     * a contentless sequence costing zero bytes — is covered here by
+     * {@code OStreamTest}'s lazy-framing cases instead.
+     */
     private static JsonArray loadVectors() {
         try (InputStream in = VectorConformanceTest.class.getResourceAsStream("/test_vectors.json")) {
             if (in == null) {

@@ -19,7 +19,13 @@ public final class Sofab {
 
     /**
      * SofaBuffers core API version. Callers and the generator check this for
-     * compatibility; the current wire/API contract is version {@code 1}.
+     * compatibility; the current contract is version {@code 1}.
+     *
+     * <p>This tracks the <b>wire contract</b> — normative and identical in every
+     * port (CORELIB_PLAN §6.2) — so it moves only when the bytes on the wire change
+     * meaning. It is <em>not</em> this library's source-compatibility version: a
+     * release that renames or removes a Java method bumps the artifact version in
+     * {@code pom.xml} and leaves {@code API_VERSION} alone.
      */
     public static final int API_VERSION = 1;
 

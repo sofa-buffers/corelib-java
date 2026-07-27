@@ -294,20 +294,50 @@ class OStreamTest {
     }
 
     /**
-     * Held-back headers are encoder state, not buffer content, so a flush can never
-     * split a pending run: a 3-byte output buffer sees exactly the one-shot bytes.
+     * A pending run committed <em>across</em> a flush boundary produces exactly the
+     * one-shot bytes: the six held-back headers plus the leaf are emitted through a
+     * 3-byte window, so {@code commitPending} itself is interrupted by several
+     * flushes mid-run, and the result is byte-identical to the same calls against a
+     * buffer that holds the whole message.
+     *
+     * <p>Note what this does <b>not</b> test, because it is unreachable by
+     * construction: a flush landing while a header is still held back. Held-back
+     * ids are encoder state and occupy no buffer space, and the buffer can only
+     * fill through a write — which commits the run before emitting its own first
+     * byte. So a pending run can never straddle a flush; the only thing a flush can
+     * split is a run that has already been committed, which is what is asserted
+     * here.
      */
     @Test
-    void lazyFramingIsBufferSizeIndependent() throws IOException {
+    void aRunCommittedAcrossFlushesMatchesTheOneShotEncoding() throws IOException {
+        EncodeBody body = os -> {
+            os.writeSequenceBeginLazy(1);
+            os.writeSequenceBeginLazy(2);
+            os.writeSequenceBeginLazy(3);
+            os.writeSequenceEnd();            // dropped: no content
+            os.writeSequenceBeginLazy(4);
+            os.writeSequenceBeginLazy(5);
+            os.writeSequenceBeginLazy(6);
+            os.writeSequenceBeginLazy(7);
+            os.writeUnsigned(0, 42);          // commits six headers in one go
+            os.writeSequenceEnd();
+            os.writeSequenceEnd();
+            os.writeSequenceEnd();
+            os.writeSequenceEnd();
+            os.writeSequenceEnd();
+            os.writeSequenceEnd();
+        };
+        byte[] oneShot = encode(body);
+        assertArrayEquals(
+                bytes(0x0E, 0x16, 0x26, 0x2E, 0x36, 0x3E, 0x00, 0x2A,
+                        0x07, 0x07, 0x07, 0x07, 0x07, 0x07),
+                oneShot);
+
         java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
         OStream os = new OStream(new byte[3], 0, out::write);
-        os.writeSequenceBeginLazy(1);
-        os.writeSequenceBeginLazy(2);
-        os.writeSequenceEnd();
-        os.writeUnsigned(0, 42);
-        os.writeSequenceEnd();
+        body.run(os);
         os.flush();
-        assertArrayEquals(bytes(0x0E, 0x00, 0x2A, 0x07), out.toByteArray());
+        assertArrayEquals(oneShot, out.toByteArray());
     }
 
     /**
@@ -419,13 +449,12 @@ class OStreamTest {
     }
 
     @Test
-    void maxDepthNestingContentlessDropsDownToTheEagerFallback() throws IOException {
-        // The same nesting closed with the dropping form. Every frame is contentless,
-        // so only those already framed eagerly past the LAZY_SEQ_DEPTH hold-back
-        // window survive; the run is a contiguous suffix of the open sequences, so
-        // each end pops exactly its own frame and none of the eager ones is left
-        // without its 0x07. An empty frame is still readable and decodes to the same
-        // value (MESSAGE_SPEC §2), which is why the fallback stays conformant.
+    void maxDepthNestingContentlessEmitsNothingAtAnyDepth() throws IOException {
+        // The same nesting closed with the dropping form. The hold-back run grows
+        // on demand to the full MAX_DEPTH (CORELIB_PLAN §6, "How deep the hold-back
+        // reaches"), so *every* frame is dropped and the message is empty. There is
+        // no depth at which this encoder falls back to eager framing; that
+        // allowance exists for heap-free profiles only.
         byte[] buf = new byte[4 * Sofab.MAX_DEPTH];
         OStream os = new OStream(buf);
         for (int i = 0; i < Sofab.MAX_DEPTH; i++) {
@@ -434,24 +463,112 @@ class OStreamTest {
         for (int i = 0; i < Sofab.MAX_DEPTH; i++) {
             os.writeSequenceEnd();
         }
-        // Every surviving frame is balanced: as many 0x06 headers as 0x07 markers.
-        int used = os.bytesUsed();
-        int begins = 0;
-        int ends = 0;
-        for (int i = 0; i < used; i++) {
-            if ((buf[i] & 0xFF) == 0x06) {
-                begins++;
-            } else if ((buf[i] & 0xFF) == 0x07) {
-                ends++;
-            }
-        }
-        assertEquals(begins, ends);
-        assertEquals(2 * begins, used);
+        assertEquals(0, os.bytesUsed());
         // Depth unwound to zero, so a full MAX_DEPTH nesting is available again.
         for (int i = 0; i < Sofab.MAX_DEPTH; i++) {
             os.writeSequenceBeginLazy(0);
         }
         SofabException ex = assertThrows(SofabException.class, () -> os.writeSequenceBeginLazy(0));
+        assertEquals(SofabError.ARGUMENT, ex.error());
+    }
+
+    /**
+     * Regression for the removed hold-back window: 40 levels is past the old
+     * {@code LAZY_SEQ_DEPTH} of 32, exactly where the eager fallback used to leak
+     * empty {@code 06 07} frames onto the wire. Contentless all the way down must
+     * now cost zero bytes.
+     */
+    @Test
+    void nestingPastTheOldHoldBackWindowStillEmitsNothing() throws IOException {
+        final int levels = 40;
+        assertArrayEquals(bytes(), encode(os -> {
+            for (int i = 0; i < levels; i++) {
+                os.writeSequenceBeginLazy(i);
+            }
+            for (int i = 0; i < levels; i++) {
+                os.writeSequenceEnd();
+            }
+        }));
+    }
+
+    /**
+     * The same 40 levels *with* a leaf at the bottom: the grown run commits in one
+     * go, outermost header first, so every enclosing frame reappears in wire order.
+     * This is the other half of the window removal — growing the run must not
+     * scramble or lose ids.
+     */
+    @Test
+    void deepRunCommitsEveryHeldBackHeaderInOrder() throws IOException {
+        final int levels = 40;
+        byte[] got = encode(os -> {
+            for (int i = 0; i < levels; i++) {
+                os.writeSequenceBeginLazy(i);
+            }
+            os.writeUnsigned(0, 42);
+            for (int i = 0; i < levels; i++) {
+                os.writeSequenceEnd();
+            }
+        });
+        // Headers for ids 0..39 in that order, each the varint (id << 3) | 6 (one
+        // byte up to id 15, two from id 16 on), then the leaf 00 2A, then 40 end
+        // markers.
+        java.io.ByteArrayOutputStream expect = new java.io.ByteArrayOutputStream();
+        for (int i = 0; i < levels; i++) {
+            long header = ((long) i << 3) | 0x06;
+            while (header >= 0x80) {
+                expect.write((int) ((header & 0x7F) | 0x80));
+                header >>>= 7;
+            }
+            expect.write((int) header);
+        }
+        expect.write(0x00);
+        expect.write(0x2A);
+        for (int i = 0; i < levels; i++) {
+            expect.write(0x07);
+        }
+        assertArrayEquals(expect.toByteArray(), got);
+    }
+
+    /**
+     * The id range is validated on the lazy opener too, before anything is held
+     * back. The opener does not route its header through {@code writeIdType}, so
+     * this check is its own and needs its own case. Only the negative half is
+     * reachable: {@code ID_MAX} is {@code Integer.MAX_VALUE}, so an {@code int}
+     * argument can never exceed it.
+     */
+    @Test
+    void lazySequenceBeginRejectsAnOutOfRangeId() throws IOException {
+        byte[] buf = new byte[16];
+        OStream os = new OStream(buf);
+        SofabException ex = assertThrows(SofabException.class, () -> os.writeSequenceBeginLazy(-1));
+        assertEquals(SofabError.ARGUMENT, ex.error());
+        // The rejected call held nothing back and opened nothing: ID_MAX is
+        // accepted right after, and closing it contentless still costs zero bytes.
+        os.writeSequenceBeginLazy(WireFormat.ID_MAX);
+        os.writeSequenceEnd();
+        assertEquals(0, os.bytesUsed());
+    }
+
+    /**
+     * {@code writeSequenceEndKeep} with no open sequence is the symmetric case to
+     * {@link #unbalancedSequenceEndIsWrittenNotRejected()}: the encoder writes what
+     * it is told, so the bare end marker reaches the wire and the malformedness is
+     * the decoder's verdict. The depth counter must not underflow.
+     */
+    @Test
+    void unbalancedSequenceEndKeepIsWrittenNotRejected() throws IOException {
+        byte[] buf = new byte[16];
+        OStream os = new OStream(buf);
+        os.writeSequenceEndKeep();
+        assertEquals(1, os.bytesUsed());
+        assertEquals(0x07, buf[0] & 0xFF);
+        // Depth did not go negative: a full MAX_DEPTH nesting is still available.
+        OStream deep = new OStream(new byte[2 * Sofab.MAX_DEPTH + 8]);
+        deep.writeSequenceEndKeep();
+        for (int i = 0; i < Sofab.MAX_DEPTH; i++) {
+            deep.writeSequenceBeginLazy(0);
+        }
+        SofabException ex = assertThrows(SofabException.class, () -> deep.writeSequenceBeginLazy(0));
         assertEquals(SofabError.ARGUMENT, ex.error());
     }
 

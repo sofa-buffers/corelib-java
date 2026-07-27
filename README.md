@@ -29,14 +29,14 @@ field id. The wire format is specified language-neutrally in the
 
 ### Package name
 
-Maven coordinates `org.sofabuffers:corelib` (version `0.1.0`); the import namespace
+Maven coordinates `org.sofabuffers:corelib` (version `0.9.0`); the import namespace
 is the package `org.sofabuffers.sofab`.
 
 ```xml
 <dependency>
   <groupId>org.sofabuffers</groupId>
   <artifactId>corelib</artifactId>
-  <version>0.1.0</version>
+  <version>0.9.0</version>
 </dependency>
 ```
 
@@ -58,7 +58,7 @@ is the package `org.sofabuffers.sofab`.
 | No reflection, no runtime codegen | Pure method calls; the decoder pushes to a `Visitor` interface. Suitable for GraalVM native-image and locked-down runtimes. |
 | Streaming **out** | `OStream` writes into a small caller buffer and invokes a `FlushSink` whenever it fills, so a message can exceed the buffer — and even RAM. |
 | Streaming **in** | `IStream` accepts arbitrarily small chunks; a message may split across `feed` calls at any byte boundary, and large string / blob payloads arrive in pieces. Malformed bytes throw `SofabException` (`INVALID_MSG`); running out of bytes mid-field is **not** an error — `feed` suspends and resumes on the next chunk. Call `status()` after the final `feed` to tell a `COMPLETE` message from a truncated `INCOMPLETE` one (MESSAGE_SPEC §7); it never throws and needs no finish/finalize step. |
-| Sparse sequence framing, still one pass | `writeSequenceBeginLazy` holds a sequence header back until a child field is actually written, so a sequence that receives no content is omitted rather than framed empty (MESSAGE_SPEC §2) — decided in a single forward pass, with no sub-message buffering. Held-back ids are encoder state, not buffer content, so a tiny output buffer still produces the one-shot bytes. `writeSequenceEnd` drops such a sequence; `writeSequenceEndKeep` forces the frame out where it carries information — a wrapper-array element, whose presence is what gives the array its length (§5.1). |
+| Sparse sequence framing, still one pass | `writeSequenceBeginLazy` holds a sequence header back until a child field is actually written, so a sequence-typed **field** that receives no content is omitted rather than framed empty (MESSAGE_SPEC §2) — decided in a single forward pass, with no sub-message buffering. Held-back ids are encoder state, not buffer content, so a tiny output buffer still produces the one-shot bytes. `writeSequenceEnd` drops such a sequence; `writeSequenceEndKeep` forces the frame out where it carries information — a wrapper-array **element** is still always framed, because its presence is what gives the array its length (§5.1). The pending run grows on demand to the full `MAX_DEPTH` (255), so the output is canonical at every legal nesting depth: no fixed window, no eager fallback (CORELIB_PLAN §6 reserves that allowance for heap-free profiles). |
 | Reserve-offset | `new OStream(buf, offset)` leaves room at the front for a lower-layer protocol header, saving a copy. |
 | Explicit endianness | IEEE-754 values are written / read little-endian with explicit bit shifts, so behaviour is identical on every JVM. |
 | Generated-code friendly | Every `Visitor` method has a default no-op, so sinks override only what they need. |
