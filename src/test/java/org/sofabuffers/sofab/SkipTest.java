@@ -25,10 +25,10 @@ class SkipTest {
         byte[] buf = new byte[256];
         OStream os = new OStream(buf);
         os.writeUnsigned(1, 11);
-        os.writeSequenceBegin(2);
+        os.writeSequenceBeginLazy(2);
         os.writeUnsigned(1, 22);
         os.writeArraySigned(3, new int[] {-1, -2, -3});
-        os.writeSequenceBegin(4);
+        os.writeSequenceBeginLazy(4);
         os.writeFp32(1, 1.5f);
         os.writeString(2, "deep");
         os.writeSequenceEnd();

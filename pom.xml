@@ -7,7 +7,12 @@
   <groupId>org.sofabuffers</groupId>
   <!-- Registry/artifact coordinate is org.sofabuffers:corelib (§6); the Java namespace stays org.sofabuffers.sofab. -->
   <artifactId>corelib</artifactId>
-  <version>0.8.0</version>
+  <!-- 0.9.0: source-breaking. writeSequenceBegin was removed in favour of the
+       writeSequenceBeginLazy / writeSequenceEnd / writeSequenceEndKeep trio, and
+       the public LAZY_SEQ_DEPTH constant is gone. Pre-1.0, the minor is where a
+       breaking change lands. Sofab.API_VERSION is the WIRE contract and stays 1:
+       the bytes are unchanged, only which of them a sparse encoder emits. -->
+  <version>0.9.0</version>
   <packaging>jar</packaging>
 
   <name>SofaBuffers CoreLib (Java)</name>

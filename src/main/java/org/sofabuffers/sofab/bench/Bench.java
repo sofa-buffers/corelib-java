@@ -66,7 +66,7 @@ public final class Bench {
         os.writeFp32(4, 3.14159f);
         os.writeString(5, "sofab");
         os.writeArrayUnsigned(6, new short[] {10, 20, 30, 40});
-        os.writeSequenceBegin(7);
+        os.writeSequenceBeginLazy(7);
         os.writeUnsigned(1, 99);
         os.writeSigned(2, -7);
         os.writeSequenceEnd();
