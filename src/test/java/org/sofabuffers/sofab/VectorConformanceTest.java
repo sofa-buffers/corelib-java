@@ -490,8 +490,10 @@ class VectorConformanceTest {
 
     private static void expectedArray(List<String> ev, int id, String elemType, JsonArray values) {
         int n = values.size();
-        // arrayBegin announces the wire category, not the declared width.
-        ArrayKind kind = elemType.startsWith("fp") ? ArrayKind.FIXLEN
+        // arrayBegin announces the wire element kind; a fixlen array names its
+        // concrete subtype (§4.8), which for a well-formed vector is the declared one.
+        ArrayKind kind = elemType.equals("fp32") ? ArrayKind.FP32
+                : elemType.equals("fp64") ? ArrayKind.FP64
                 : elemType.charAt(0) == 'u' ? ArrayKind.UNSIGNED : ArrayKind.SIGNED;
         ev.add("arr:" + id + ":" + kind + ":" + n);
         for (JsonElement el : values) {

@@ -78,7 +78,7 @@ class IStreamTest {
                 0x00, 0x08, 0x40, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xEF, 0xFF, 0xFF,
                 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xEF, 0x7F));
         assertEquals(
-                List.of("arr:0:FIXLEN:5", "f64:0=1.0", "f64:0=2.0", "f64:0=3.0",
+                List.of("arr:0:FP64:5", "f64:0=1.0", "f64:0=2.0", "f64:0=3.0",
                         "f64:0=" + (-Double.MAX_VALUE), "f64:0=" + Double.MAX_VALUE),
                 ev);
     }
