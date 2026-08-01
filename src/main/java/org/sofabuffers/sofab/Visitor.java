@@ -96,8 +96,23 @@ public interface Visitor {
      * Start of an array field. The {@code count} elements follow through the
      * scalar / float callbacks with the same {@code id}.
      *
+     * <p><b>When it fires.</b> For an integer array (wire types
+     * {@code ARRAY_UNSIGNED} / {@code ARRAY_SIGNED}) this is called immediately
+     * after the element-count varint — that word is the whole header. For a
+     * fixlen array ({@code ARRAY_FIXLEN}) it is called only after the
+     * {@code fixlen_word} that follows the count has been read <em>and</em>
+     * validated as a format matter, so {@code kind} always names the concrete
+     * element subtype ({@link ArrayKind#FP32} / {@link ArrayKind#FP64}).
+     * CORELIB_PLAN §4.8 requires that ordering: a fixlen array whose subtype
+     * contradicts the declared element type is skipped under MESSAGE_SPEC §7.3
+     * and its {@code count} must not be judged against a schema bound, so the
+     * subtype has to be known before the visitor is asked about the field.
+     * Either way the call happens exactly once per array field, before any
+     * element callback; a message that ends between the two words produces no
+     * call at all (it is INCOMPLETE, not INVALID).
+     *
      * @param id    field id
-     * @param kind  element category
+     * @param kind  element category, naming the fixlen subtype for a fixlen array
      * @param count number of elements
      */
     default void arrayBegin(int id, ArrayKind kind, int count) {

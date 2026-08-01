@@ -97,6 +97,14 @@ public final class IStream {
     private ArrayKind arrayKind = ArrayKind.UNSIGNED;
     private int arrayRemaining;
     private boolean inArray;
+    /**
+     * Whether the array being read is a fixlen (fp32/fp64) array. Its element
+     * kind is not known at the count word — it is carried by the
+     * {@code fixlen_word} that follows — so {@link #arrayKind} is only settled,
+     * and {@link Visitor#arrayBegin} only fired, once that word has been read
+     * (CORELIB_PLAN §4.8). Integer arrays settle both at the count word.
+     */
+    private boolean fixlenArray;
 
     // fixlen context
     private FixlenType fixlenType = FixlenType.FP32;
@@ -356,12 +364,15 @@ public final class IStream {
                 return fastFixlenScalar(data, p, end, visitor);
             case T_VARINTARRAY_UNSIGNED:
                 arrayKind = ArrayKind.UNSIGNED;
+                fixlenArray = false;
                 return fastVarintArray(data, p, end, visitor, false);
             case T_VARINTARRAY_SIGNED:
                 arrayKind = ArrayKind.SIGNED;
+                fixlenArray = false;
                 return fastVarintArray(data, p, end, visitor, true);
             case T_FIXLENARRAY:
-                arrayKind = ArrayKind.FIXLEN;
+                // arrayKind stays unsettled until the fixlen_word names the subtype.
+                fixlenArray = true;
                 return fastFixlenArray(data, p, end, visitor);
             default:
                 throw new SofabException(SofabError.INVALID_MSG, "field type " + wireType);
@@ -444,7 +455,7 @@ public final class IStream {
     /** Fast path for an unsigned/signed varint array; {@code i} points at the count. */
     private int fastVarintArray(byte[] data, int i, int end, Visitor visitor, boolean signed)
             throws SofabException {
-        int p = fastArrayHeader(data, i, end, visitor);
+        int p = fastArrayHeader(data, i, end, visitor, true);
         if (p < 0) {
             return i; // count header spilled past the buffer; machine reads it (arrayKind set)
         }
@@ -536,7 +547,10 @@ public final class IStream {
 
     /** Fast path for a fixlen (fp32/fp64) array; {@code i} points at the count. */
     private int fastFixlenArray(byte[] data, int i, int end, Visitor visitor) throws SofabException {
-        int p = fastArrayHeader(data, i, end, visitor);
+        // §4.8 step 1/2: the count word only sets up the array context — the format
+        // ceiling fires there, but arrayBegin does NOT, because the element subtype
+        // it must report is still one varint away.
+        int p = fastArrayHeader(data, i, end, visitor, false);
         if (p < 0) {
             return i; // count header spilled past the buffer; machine reads it
         }
@@ -583,11 +597,18 @@ public final class IStream {
             }
             size = 8;
         } else {
-            // String/blob are not valid as fixlen-array elements.
+            // String/blob are not valid as fixlen-array elements (§4.8). This is a
+            // FORMAT violation, judged before the visitor is offered the field, so
+            // it can never be turned into a §7.3 skip.
             throw new SofabException(SofabError.INVALID_MSG, "dynamic fixlen array element");
         }
         fixlenType = subtype;
         fixlenTotal = size;
+        // §4.8 step 3: the word is format-valid, so the subtype is now known and
+        // the array can be announced. Firing here (rather than on the count word)
+        // is what lets a visitor skip a field whose subtype contradicts its schema
+        // without judging the count against a bound that does not apply to it.
+        arrayBeginFixlen(size == 4 ? ArrayKind.FP32 : ArrayKind.FP64, visitor);
         int remaining = arrayRemaining;
         final int fieldId = id;
         while (remaining > 0) {
@@ -614,14 +635,23 @@ public final class IStream {
     }
 
     /**
-     * Read and validate an array count header at {@code i}, then emit
-     * {@code arrayBegin} and set up the array context ({@link #arrayRemaining},
-     * {@link #inArray}). Returns the index after the count, or {@code -1} if the
-     * count spilled past the buffer — in which case nothing is emitted and the
-     * state machine re-reads the count from {@code i} ({@link #arrayKind} is
-     * already set), so {@code arrayBegin} fires exactly once.
+     * Read and validate an array count header at {@code i} and set up the array
+     * context ({@link #arrayRemaining}, {@link #inArray}), emitting
+     * {@code arrayBegin} when {@code emitBegin} is set. Returns the index after
+     * the count, or {@code -1} if the count spilled past the buffer — in which
+     * case nothing is emitted and the state machine re-reads the count from
+     * {@code i} ({@link #arrayKind} / {@link #fixlenArray} are already set), so
+     * {@code arrayBegin} fires exactly once.
+     *
+     * <p>{@code emitBegin} is {@code false} for a fixlen array: its element kind
+     * is only known once the {@code fixlen_word} after the count has been read,
+     * so the caller fires the hook there (CORELIB_PLAN §4.8). The {@code ARRAY_MAX}
+     * format ceiling below is <em>not</em> deferred with it — §4.8 step 1 keeps it
+     * on the count word, whatever the subtype turns out to be, and nothing is
+     * allocated on the strength of the count either way.
      */
-    private int fastArrayHeader(byte[] data, int i, int end, Visitor visitor) throws SofabException {
+    private int fastArrayHeader(byte[] data, int i, int end, Visitor visitor, boolean emitBegin)
+            throws SofabException {
         long count = 0;
         int shift = 0;
         int p = i;
@@ -651,8 +681,20 @@ public final class IStream {
         int c = (int) count;
         arrayRemaining = c;
         inArray = true;
-        visitor.arrayBegin(id, arrayKind, c);
+        if (emitBegin) {
+            visitor.arrayBegin(id, arrayKind, c);
+        }
         return p;
+    }
+
+    /**
+     * Announce a fixlen array now that its {@code fixlen_word} has been read and
+     * found format-valid: settle {@link #arrayKind} to the concrete subtype and
+     * fire {@link Visitor#arrayBegin} exactly once for the field.
+     */
+    private void arrayBeginFixlen(ArrayKind kind, Visitor visitor) {
+        arrayKind = kind;
+        visitor.arrayBegin(id, kind, arrayRemaining);
     }
 
     /** Arm the state machine to accumulate a fixed-size fixlen value (fp32/fp64). */
@@ -768,14 +810,17 @@ public final class IStream {
                 break;
             case T_VARINTARRAY_UNSIGNED:
                 arrayKind = ArrayKind.UNSIGNED;
+                fixlenArray = false;
                 state = State.ARRAY_COUNT;
                 break;
             case T_VARINTARRAY_SIGNED:
                 arrayKind = ArrayKind.SIGNED;
+                fixlenArray = false;
                 state = State.ARRAY_COUNT;
                 break;
             case T_FIXLENARRAY:
-                arrayKind = ArrayKind.FIXLEN;
+                // arrayKind stays unsettled until the fixlen_word names the subtype.
+                fixlenArray = true;
                 state = State.ARRAY_COUNT;
                 break;
             case T_SEQUENCE_START:
@@ -862,17 +907,29 @@ public final class IStream {
                 if (length != 4) {
                     throw new SofabException(SofabError.INVALID_MSG, "fp32 length " + length);
                 }
+                // §4.8 step 3: the array's deferred arrayBegin lands here, once the
+                // word is known format-valid and its subtype settled (see
+                // Visitor#arrayBegin). inArray is only true for a fixlen array in
+                // this state; a scalar fixlen field announces nothing.
+                if (inArray) {
+                    arrayBeginFixlen(ArrayKind.FP32, visitor);
+                }
                 state = afterFixlenWord();
                 break;
             case FP64:
                 if (length != 8) {
                     throw new SofabException(SofabError.INVALID_MSG, "fp64 length " + length);
                 }
+                if (inArray) {
+                    arrayBeginFixlen(ArrayKind.FP64, visitor);
+                }
                 state = afterFixlenWord();
                 break;
             case STRING:
             case BLOB:
-                // String/blob are not valid as fixlen-array elements.
+                // String/blob are not valid as fixlen-array elements: a FORMAT
+                // violation (§4.8), rejected before the field is ever offered to
+                // the visitor, so it can never become a §7.3 skip.
                 if (inArray) {
                     throw new SofabException(SofabError.INVALID_MSG, "dynamic fixlen array element");
                 }
@@ -947,46 +1004,49 @@ public final class IStream {
     }
 
     /**
-     * Accumulate an array count header; on completion validate it, emit
-     * {@link Visitor#arrayBegin} once, set up the array context, and arm the
-     * per-element state matching {@link #arrayKind} (varint or fixlen).
+     * Accumulate an array count header; on completion validate it, set up the
+     * array context, and arm the per-element state. An integer array is announced
+     * here via {@link Visitor#arrayBegin} — its count word is the whole header. A
+     * fixlen array is not: it advances into {@link State#FIXLEN_LEN} and
+     * {@link #stepFixlenLen} announces it once the {@code fixlen_word} has named
+     * the element subtype (CORELIB_PLAN §4.8). Either way the hook fires exactly
+     * once per array field.
      */
     private void stepArrayCount(int b, Visitor visitor) throws SofabException {
         if (!varintPush(b)) {
             return;
         }
         long count = varintOut;
-        // count == 0 is a valid empty array (§4.7/§4.8); only an oversized count is rejected.
+        // §4.8 step 1: the format ceiling applies to the count word itself,
+        // whatever the element subtype turns out to be. count == 0 is a valid empty
+        // array (§4.7/§4.8); only an oversized count is rejected. Nothing is
+        // allocated on the strength of the count.
         if (Long.compareUnsigned(count, ARRAY_MAX) > 0) {
             throw new SofabException(SofabError.INVALID_MSG, "array count");
         }
         int c = (int) count;
         arrayRemaining = c;
         inArray = true;
+
+        if (fixlenArray) {
+            // A fixlen array always carries its fixlen_word, even when empty (§4.8),
+            // so an empty one still advances into FIXLEN_LEN to consume it.
+            // stepFixlenLen fires arrayBegin there and finishes an empty array once
+            // the word is read (no payload follows). Ending the message between the
+            // two words therefore announces nothing at all: INCOMPLETE, not INVALID.
+            state = State.FIXLEN_LEN;
+            return;
+        }
+
         visitor.arrayBegin(id, arrayKind, c);
 
-        if (c == 0 && arrayKind != ArrayKind.FIXLEN) {
+        if (c == 0) {
             // Empty varint array: no elements and no fixlen_word follow; the field
             // ends at the count.
             inArray = false;
             state = State.IDLE;
             return;
         }
-        // A fixlen array always carries its fixlen_word, even when empty (§4.8), so
-        // an empty one still advances into FIXLEN_LEN to consume it; stepFixlenLen
-        // finishes an empty array once the word is read (no payload follows).
-
-        switch (arrayKind) {
-            case UNSIGNED:
-                state = State.VARINT_UNSIGNED;
-                break;
-            case SIGNED:
-                state = State.VARINT_SIGNED;
-                break;
-            case FIXLEN:
-            default:
-                state = State.FIXLEN_LEN;
-                break;
-        }
+        state = arrayKind == ArrayKind.SIGNED ? State.VARINT_SIGNED : State.VARINT_UNSIGNED;
     }
 }
