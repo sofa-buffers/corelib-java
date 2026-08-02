@@ -29,14 +29,14 @@ field id. The wire format is specified language-neutrally in the
 
 ### Package name
 
-Maven coordinates `org.sofabuffers:corelib` (version `0.9.0`); the import namespace
+Maven coordinates `org.sofabuffers:corelib` (version `0.10.0`); the import namespace
 is the package `org.sofabuffers.sofab`.
 
 ```xml
 <dependency>
   <groupId>org.sofabuffers</groupId>
   <artifactId>corelib</artifactId>
-  <version>0.9.0</version>
+  <version>0.10.0</version>
 </dependency>
 ```
 
@@ -200,7 +200,15 @@ throughout, with state in caller-provided arrays plus a small fixed object.
   fills, a `FlushSink` (if set) receives the bytes and writing resumes at the start
   of the *same* buffer — so a message can exceed the buffer or RAM; with no sink, a
   full buffer raises `BUFFER_FULL`. The sink's array is reused after the call
-  returns, so a sink that keeps the bytes must copy them. (`writeString` encodes
+  returns, so a sink that keeps the bytes must copy them. A multi-byte varint is
+  assembled in a register and stored eight bytes at a time, so the encoder may leave
+  up to **seven scratch bytes** in the buffer just past the write position; they are
+  never part of the message, sit strictly between `bytesUsed()` and the end of the
+  buffer, are overwritten by the next write, and are never flushed — read back only
+  `[0, bytesUsed())`. Bytes before the starting `offset` reserved for a lower-layer
+  header are never touched, and a buffer with fewer than ten bytes free falls back to
+  the byte-at-a-time path, so small buffers see no scratch writes at all.
+  (`writeString` encodes
   UTF-8 **directly into the buffer**, with no intermediate `byte[]`.) String
   encoding is **always strict** UTF-8 (MESSAGE_SPEC §8): a `String` is a Unicode
   string type, so the only value it cannot represent as well-formed UTF-8 is an

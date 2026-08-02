@@ -6,6 +6,9 @@
 package org.sofabuffers.sofab;
 
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 
 import static org.sofabuffers.sofab.WireFormat.ID_MAX;
@@ -37,6 +40,16 @@ import static org.sofabuffers.sofab.WireFormat.zigzagEncode;
  * path that flushes mid-value is used only when the buffer is too small to hold
  * the value outright. Raw string / blob payloads are copied in bulk up to each
  * buffer boundary. The wire output is identical regardless of buffer size.
+ *
+ * <p>A multi-byte varint is assembled in a register and written with a single
+ * eight-byte store, so the encoder may leave up to seven <b>scratch bytes</b> in
+ * the buffer immediately after the current write position. They are never part of
+ * the message and never escape: they sit strictly between {@link #bytesUsed()} and
+ * the end of the buffer, are overwritten by the next write, and only
+ * {@code [0, bytesUsed())} is ever handed to a {@link FlushSink}. Bytes before the
+ * starting {@code offset} — the region reserved for a lower-layer header — are
+ * never touched. A buffer with fewer than ten bytes free falls back to the
+ * byte-at-a-time path, so small buffers see no scratch writes at all.
  *
  * <p>Sequences are framed <b>lazily</b>: {@link #writeSequenceBeginLazy(int)}
  * holds the header back until the sequence turns out to have content. A
@@ -72,6 +85,34 @@ public final class OStream {
      */
     private static final int PENDING_INITIAL = 8;
 
+    /**
+     * Little-endian views over a {@code byte[]}. A float payload — and the
+     * eight-byte window a varint is assembled in — is written with one
+     * intrinsified unaligned store instead of a byte at a time, paying a single
+     * bounds check rather than one per byte.
+     */
+    private static final VarHandle LE_INT =
+            MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.LITTLE_ENDIAN);
+    private static final VarHandle LE_LONG =
+            MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
+
+    /** One per byte lane: the continuation bit of each of eight varint bytes. */
+    private static final long CONT_BITS = 0x8080_8080_8080_8080L;
+
+    /**
+     * Bytes of room that let {@link #putVarint} assemble a varint in a single
+     * eight-byte store: ten covers the longest varint, and the store itself
+     * always touches eight bytes from the write position.
+     */
+    private static final int VARINT_ROOM = 10;
+
+    /**
+     * Room needed to write a field header and a scalar value with one cursor and
+     * one bounds test: a header is at most five bytes ({@code id << 3} spans 34
+     * bits) and a value at most ten.
+     */
+    private static final int FIELD_ROOM = 15;
+
     private byte[] buffer;
     private int end;
     private int offset;
@@ -94,7 +135,15 @@ public final class OStream {
      */
     private int[] pending;
 
-    /** Number of valid entries in {@link #pending}. */
+    /**
+     * The outermost held-back id, kept out of {@link #pending} so that a stream
+     * whose sequences never nest — much the commonest shape — holds one back
+     * without allocating an array at all. {@link #pending} carries entries two and
+     * beyond, and is still allocated only if that depth is reached.
+     */
+    private int pending0;
+
+    /** Total number of held-back ids: {@link #pending0} plus {@link #pending}. */
     private int nPending;
 
     /**
@@ -222,24 +271,12 @@ public final class OStream {
 
     private void writeVarint(long value) throws IOException {
         // Fast path: a base-128 varint is at most 10 bytes. When that much room is
-        // guaranteed, advance a cursor over the buffer with no per-byte bounds or
-        // flush check (the protobuf "write into a contiguous buffer" technique).
-        // Single-byte values (field headers, small scalars) are by far the most
-        // common and skip the loop entirely.
+        // guaranteed, write it with no per-byte bounds or flush check (the protobuf
+        // "write into a contiguous buffer" technique). Single-byte values (field
+        // headers, small scalars) are by far the most common and cost one store.
         int p = offset;
-        if (end - p >= 10) {
-            byte[] b = buffer;
-            if ((value & ~0x7FL) == 0) {
-                b[p] = (byte) value;
-                offset = p + 1;
-                return;
-            }
-            do {
-                b[p++] = (byte) (((int) value & 0x7F) | 0x80);
-                value >>>= 7;
-            } while ((value & ~0x7FL) != 0);
-            b[p++] = (byte) value;
-            offset = p;
+        if (end - p >= VARINT_ROOM) {
+            offset = putVarint(buffer, p, value);
             return;
         }
         writeVarintSlow(value);
@@ -261,11 +298,7 @@ public final class OStream {
     private void putLe32(int bits) throws IOException {
         int p = offset;
         if (end - p >= 4) {
-            byte[] b = buffer;
-            b[p] = (byte) bits;
-            b[p + 1] = (byte) (bits >>> 8);
-            b[p + 2] = (byte) (bits >>> 16);
-            b[p + 3] = (byte) (bits >>> 24);
+            LE_INT.set(buffer, p, bits);
             offset = p + 4;
             return;
         }
@@ -279,15 +312,7 @@ public final class OStream {
     private void putLe64(long bits) throws IOException {
         int p = offset;
         if (end - p >= 8) {
-            byte[] b = buffer;
-            b[p] = (byte) bits;
-            b[p + 1] = (byte) (bits >>> 8);
-            b[p + 2] = (byte) (bits >>> 16);
-            b[p + 3] = (byte) (bits >>> 24);
-            b[p + 4] = (byte) (bits >>> 32);
-            b[p + 5] = (byte) (bits >>> 40);
-            b[p + 6] = (byte) (bits >>> 48);
-            b[p + 7] = (byte) (bits >>> 56);
+            LE_LONG.set(buffer, p, bits);
             offset = p + 8;
             return;
         }
@@ -308,6 +333,17 @@ public final class OStream {
      * (MESSAGE_SPEC §2).
      */
     private void writeIdType(int id, int wireType) throws IOException {
+        beginField(id);
+        writeVarint(((long) id << 3) | wireType);
+    }
+
+    /**
+     * Validate {@code id} and settle any held-back sequence run, the two things
+     * every field write does before its first byte reaches the buffer. Split out of
+     * {@link #writeIdType} so a writer that emits its header and value together can
+     * share them without also being forced through a separate header write.
+     */
+    private void beginField(int id) throws IOException {
         if (id < 0 || id > ID_MAX) {
             throw new SofabException(SofabError.ARGUMENT, "id " + id);
         }
@@ -321,7 +357,23 @@ public final class OStream {
         if (nPending != 0) {
             commitPending();
         }
+    }
+
+    /**
+     * Write a field header and a scalar varint value together. Both are at most
+     * fifteen bytes, so one room test and one cursor cover the pair, halving the
+     * bounds/flush checks and the {@code offset} round trips a field costs.
+     */
+    private void writeIdTypeValue(int id, int wireType, long value) throws IOException {
+        beginField(id);
+        int p = offset;
+        if (end - p >= FIELD_ROOM) {
+            byte[] b = buffer;
+            offset = putVarint(b, putVarint(b, p, ((long) id << 3) | wireType), value);
+            return;
+        }
         writeVarint(((long) id << 3) | wireType);
+        writeVarint(value);
     }
 
     /**
@@ -331,7 +383,8 @@ public final class OStream {
     private void commitPending() throws IOException {
         int n = nPending;
         nPending = 0;
-        for (int i = 0; i < n; i++) {
+        writeVarint(((long) pending0 << 3) | T_SEQUENCE_START);
+        for (int i = 0; i < n - 1; i++) {
             writeVarint(((long) pending[i] << 3) | T_SEQUENCE_START);
         }
     }
@@ -347,8 +400,7 @@ public final class OStream {
      * @throws IOException on buffer overflow (no sink) or sink failure
      */
     public void writeUnsigned(int id, long value) throws IOException {
-        writeIdType(id, T_VARINT_UNSIGNED);
-        writeVarint(value);
+        writeIdTypeValue(id, T_VARINT_UNSIGNED, value);
     }
 
     /**
@@ -359,8 +411,7 @@ public final class OStream {
      * @throws IOException on buffer overflow or sink failure
      */
     public void writeSigned(int id, long value) throws IOException {
-        writeIdType(id, T_VARINT_SIGNED);
-        writeVarint(zigzagEncode(value));
+        writeIdTypeValue(id, T_VARINT_SIGNED, zigzagEncode(value));
     }
 
     /**
@@ -392,8 +443,7 @@ public final class OStream {
         if (length < 0) {
             throw new SofabException(SofabError.ARGUMENT, "length " + length);
         }
-        writeIdType(id, T_FIXLEN);
-        writeVarint(((long) length << 3) | subtype.raw());
+        writeIdTypeValue(id, T_FIXLEN, ((long) length << 3) | subtype.raw());
         pushRaw(data, from, length);
     }
 
@@ -406,7 +456,18 @@ public final class OStream {
      */
     public void writeFp32(int id, float value) throws IOException {
         int bits = Float.floatToRawIntBits(value);
-        writeIdType(id, T_FIXLEN);
+        beginField(id);
+        int p = offset;
+        // Header (<=5) + the constant one-byte fixlen_word + four payload bytes.
+        if (end - p >= FIELD_ROOM) {
+            byte[] b = buffer;
+            p = putVarint(b, p, ((long) id << 3) | T_FIXLEN);
+            b[p] = (byte) ((4 << 3) | FixlenType.FP32.raw());
+            LE_INT.set(b, p + 1, bits);
+            offset = p + 5;
+            return;
+        }
+        writeVarint(((long) id << 3) | T_FIXLEN);
         writeVarint((4L << 3) | FixlenType.FP32.raw());
         putLe32(bits);
     }
@@ -420,7 +481,18 @@ public final class OStream {
      */
     public void writeFp64(int id, double value) throws IOException {
         long bits = Double.doubleToRawLongBits(value);
-        writeIdType(id, T_FIXLEN);
+        beginField(id);
+        int p = offset;
+        // Header (<=5) + the constant one-byte fixlen_word + eight payload bytes.
+        if (end - p >= FIELD_ROOM) {
+            byte[] b = buffer;
+            p = putVarint(b, p, ((long) id << 3) | T_FIXLEN);
+            b[p] = (byte) ((8 << 3) | FixlenType.FP64.raw());
+            LE_LONG.set(b, p + 1, bits);
+            offset = p + 9;
+            return;
+        }
+        writeVarint(((long) id << 3) | T_FIXLEN);
         writeVarint((8L << 3) | FixlenType.FP64.raw());
         putLe64(bits);
     }
@@ -446,8 +518,7 @@ public final class OStream {
         // intermediate byte[] per call (String.getBytes). One pass measures the
         // byte length for the fixlen header, the second emits the bytes.
         int n = utf8Length(text);
-        writeIdType(id, T_FIXLEN);
-        writeVarint(((long) n << 3) | FixlenType.STRING.raw());
+        writeIdTypeValue(id, T_FIXLEN, ((long) n << 3) | FixlenType.STRING.raw());
         writeUtf8(text, n);
     }
 
@@ -606,33 +677,64 @@ public final class OStream {
     private static final int BULK_MIN = 16;
 
     /**
+     * Spread the low 56 bits of {@code v} into eight byte lanes, seven payload bits
+     * each — the inverse of the decoder's lane gather. Group {@code i} sits at bits
+     * {@code [7i, 7i+7)} and belongs at {@code [8i, 8i+7)}.
+     *
+     * <p>Done by repeated halving rather than one term per group: split 56 bits into
+     * two 28-bit halves and open a 4-bit gap, then each half into 14-bit quarters
+     * with a 2-bit gap, then each quarter into 7-bit eighths with a 1-bit gap. Three
+     * mask/shift/or stages replace eight, which matters because this is the whole
+     * cost of encoding a multi-byte varint.
+     */
+    private static long scatter7(long v) {
+        long x = (v & 0x0FFF_FFFFL) | ((v & 0x00FF_FFFF_F000_0000L) << 4);
+        x = (x & 0x0000_3FFF_0000_3FFFL) | ((x & 0x0FFF_C000_0FFF_C000L) << 2);
+        return (x & 0x007F_007F_007F_007FL) | ((x & 0x3F80_3F80_3F80_3F80L) << 1);
+    }
+
+    /**
      * Emit {@code v} as a base-128 varint into {@code b} at {@code p}, returning the
-     * next write position. The caller guarantees at least ten bytes of room
-     * ({@code end - p >= 10}). Fully unrolled (the mirror of the decoder's unrolled
-     * reader): the constant offsets from {@code p} let the JIT hoist a single range
-     * check for the whole ten-byte window, and the straight-line form drops the
-     * per-byte loop-branch/shift-counter overhead of the general {@code while} form.
+     * next write position. The caller guarantees at least {@link #VARINT_ROOM} bytes
+     * of room ({@code end - p >= 10}).
+     *
+     * <p>Single-byte values — field headers, small scalars, most array elements —
+     * take a direct store. Anything longer is assembled whole in a 64-bit register
+     * (seven payload bits per lane, continuation bits set, then cleared on the final
+     * lane) and written with <b>one</b> eight-byte store, rather than a per-byte
+     * loop that pays a test, a shift and a bounds-checked store for every byte. The
+     * ninth and tenth bytes of a maximal varint follow individually.
+     *
+     * <p>The eight-byte store always touches eight bytes even when the varint is
+     * shorter, so up to seven scratch bytes can land in the buffer <em>past</em> the
+     * new write position. They are never part of the message: the caller advances by
+     * the varint's true length, the next write overwrites them, and only
+     * {@code [0, bytesUsed())} is ever handed to a sink. The ten-byte room
+     * requirement keeps the store inside the buffer.
      */
     private static int putVarint(byte[] b, int p, long v) {
-        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
-        b[p++] = (byte) (v | 0x80); v >>>= 7;
-        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
-        b[p++] = (byte) (v | 0x80); v >>>= 7;
-        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
-        b[p++] = (byte) (v | 0x80); v >>>= 7;
-        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
-        b[p++] = (byte) (v | 0x80); v >>>= 7;
-        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
-        b[p++] = (byte) (v | 0x80); v >>>= 7;
-        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
-        b[p++] = (byte) (v | 0x80); v >>>= 7;
-        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
-        b[p++] = (byte) (v | 0x80); v >>>= 7;
-        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
-        b[p++] = (byte) (v | 0x80); v >>>= 7;
-        if ((v & ~0x7FL) == 0) { b[p] = (byte) v; return p + 1; }
-        b[p++] = (byte) (v | 0x80); v >>>= 7;
-        b[p] = (byte) v; return p + 1;
+        if ((v & ~0x7FL) == 0) {
+            b[p] = (byte) v;
+            return p + 1;
+        }
+        // ceil(bits / 7) where bits = 64 - numberOfLeadingZeros(v); 2..10 here.
+        int n = (70 - Long.numberOfLeadingZeros(v)) / 7;
+        long w = scatter7(v) | CONT_BITS;
+        if (n <= 8) {
+            // Clear the continuation bit of the last lane; higher lanes are scratch.
+            LE_LONG.set(b, p, w & ~(0x80L << ((n - 1) << 3)));
+            return p + n;
+        }
+        LE_LONG.set(b, p, w);
+        long hi = v >>> 56;
+        // For n == 10 bit 63 of v is bit 7 of hi, which is exactly the continuation
+        // flag the ninth byte needs; for n == 9 it is clear, which is what it needs.
+        b[p + 8] = (byte) hi;
+        if (n == 9) {
+            return p + 9;
+        }
+        b[p + 9] = (byte) (hi >>> 7);
+        return p + 10;
     }
 
     /**
@@ -644,8 +746,7 @@ public final class OStream {
         if (count < 0) {
             throw new SofabException(SofabError.ARGUMENT, "negative count " + count);
         }
-        writeIdType(id, wireType);
-        writeVarint(count);
+        writeIdTypeValue(id, wireType, count);
     }
 
     /**
@@ -662,7 +763,7 @@ public final class OStream {
         int e = end;
         for (byte elem : data) {
             long v = elem & 0xFFL;
-            if (e - p < 10) {
+            if (e - p < VARINT_ROOM) {
                 offset = p;
                 writeVarintSlow(v);
                 b = buffer;
@@ -670,11 +771,7 @@ public final class OStream {
                 e = end;
                 continue;
             }
-            while ((v & ~0x7FL) != 0) {
-                b[p++] = (byte) ((v & 0x7F) | 0x80);
-                v >>>= 7;
-            }
-            b[p++] = (byte) v;
+            p = putVarint(b, p, v);
         }
         offset = p;
     }
@@ -693,7 +790,7 @@ public final class OStream {
         int e = end;
         for (short elem : data) {
             long v = elem & 0xFFFFL;
-            if (e - p < 10) {
+            if (e - p < VARINT_ROOM) {
                 offset = p;
                 writeVarintSlow(v);
                 b = buffer;
@@ -701,11 +798,7 @@ public final class OStream {
                 e = end;
                 continue;
             }
-            while ((v & ~0x7FL) != 0) {
-                b[p++] = (byte) ((v & 0x7F) | 0x80);
-                v >>>= 7;
-            }
-            b[p++] = (byte) v;
+            p = putVarint(b, p, v);
         }
         offset = p;
     }
@@ -731,7 +824,7 @@ public final class OStream {
         int e = end;
         for (int elem : data) {
             long v = elem & 0xFFFFFFFFL;
-            if (e - p < 10) {
+            if (e - p < VARINT_ROOM) {
                 offset = p;
                 writeVarintSlow(v);
                 b = buffer;
@@ -739,11 +832,7 @@ public final class OStream {
                 e = end;
                 continue;
             }
-            while ((v & ~0x7FL) != 0) {
-                b[p++] = (byte) ((v & 0x7F) | 0x80);
-                v >>>= 7;
-            }
-            b[p++] = (byte) v;
+            p = putVarint(b, p, v);
         }
         offset = p;
     }
@@ -773,7 +862,7 @@ public final class OStream {
         int e = end;
         for (long elem : data) {
             long v = elem;
-            if (e - p < 10) {
+            if (e - p < VARINT_ROOM) {
                 offset = p;
                 writeVarintSlow(v);
                 b = buffer;
@@ -781,11 +870,7 @@ public final class OStream {
                 e = end;
                 continue;
             }
-            while ((v & ~0x7FL) != 0) {
-                b[p++] = (byte) ((v & 0x7F) | 0x80);
-                v >>>= 7;
-            }
-            b[p++] = (byte) v;
+            p = putVarint(b, p, v);
         }
         offset = p;
     }
@@ -804,7 +889,7 @@ public final class OStream {
         int e = end;
         for (byte elem : data) {
             long v = zigzagEncode(elem);
-            if (e - p < 10) {
+            if (e - p < VARINT_ROOM) {
                 offset = p;
                 writeVarintSlow(v);
                 b = buffer;
@@ -812,11 +897,7 @@ public final class OStream {
                 e = end;
                 continue;
             }
-            while ((v & ~0x7FL) != 0) {
-                b[p++] = (byte) ((v & 0x7F) | 0x80);
-                v >>>= 7;
-            }
-            b[p++] = (byte) v;
+            p = putVarint(b, p, v);
         }
         offset = p;
     }
@@ -835,7 +916,7 @@ public final class OStream {
         int e = end;
         for (short elem : data) {
             long v = zigzagEncode(elem);
-            if (e - p < 10) {
+            if (e - p < VARINT_ROOM) {
                 offset = p;
                 writeVarintSlow(v);
                 b = buffer;
@@ -843,11 +924,7 @@ public final class OStream {
                 e = end;
                 continue;
             }
-            while ((v & ~0x7FL) != 0) {
-                b[p++] = (byte) ((v & 0x7F) | 0x80);
-                v >>>= 7;
-            }
-            b[p++] = (byte) v;
+            p = putVarint(b, p, v);
         }
         offset = p;
     }
@@ -873,7 +950,7 @@ public final class OStream {
         int e = end;
         for (int elem : data) {
             long v = zigzagEncode(elem);
-            if (e - p < 10) {
+            if (e - p < VARINT_ROOM) {
                 offset = p;
                 writeVarintSlow(v);
                 b = buffer;
@@ -881,11 +958,7 @@ public final class OStream {
                 e = end;
                 continue;
             }
-            while ((v & ~0x7FL) != 0) {
-                b[p++] = (byte) ((v & 0x7F) | 0x80);
-                v >>>= 7;
-            }
-            b[p++] = (byte) v;
+            p = putVarint(b, p, v);
         }
         offset = p;
     }
@@ -911,7 +984,7 @@ public final class OStream {
         int e = end;
         for (long elem : data) {
             long v = zigzagEncode(elem);
-            if (e - p < 10) {
+            if (e - p < VARINT_ROOM) {
                 offset = p;
                 writeVarintSlow(v);
                 b = buffer;
@@ -919,11 +992,7 @@ public final class OStream {
                 e = end;
                 continue;
             }
-            while ((v & ~0x7FL) != 0) {
-                b[p++] = (byte) ((v & 0x7F) | 0x80);
-                v >>>= 7;
-            }
-            b[p++] = (byte) v;
+            p = putVarint(b, p, v);
         }
         offset = p;
     }
@@ -936,13 +1005,24 @@ public final class OStream {
      * @throws IOException on buffer overflow or sink failure
      */
     public void writeArrayFp32(int id, float[] data) throws IOException {
-        writeIdType(id, T_FIXLENARRAY);
-        writeVarint(data.length);
+        writeIdTypeValue(id, T_FIXLENARRAY, data.length);
         // §4.8: a fixlen array always carries its fixlen_word (the shared element
         // subtype/width), even when empty, so an empty fp32 array is
         // distinguishable on the wire from an empty fp64 array. The payload loop
         // simply runs zero times when the array is empty.
         writeVarint((4L << 3) | FixlenType.FP32.raw());
+        int p = offset;
+        if ((long) end - p >= (long) data.length * 4) {
+            // The whole payload fits: no element can overflow, so run a tight loop
+            // with no per-element room check or flush test.
+            byte[] b = buffer;
+            for (float v : data) {
+                LE_INT.set(b, p, Float.floatToRawIntBits(v));
+                p += 4;
+            }
+            offset = p;
+            return;
+        }
         for (float v : data) {
             putLe32(Float.floatToRawIntBits(v));
         }
@@ -956,13 +1036,22 @@ public final class OStream {
      * @throws IOException on buffer overflow or sink failure
      */
     public void writeArrayFp64(int id, double[] data) throws IOException {
-        writeIdType(id, T_FIXLENARRAY);
-        writeVarint(data.length);
+        writeIdTypeValue(id, T_FIXLENARRAY, data.length);
         // §4.8: a fixlen array always carries its fixlen_word (the shared element
         // subtype/width), even when empty, so an empty fp64 array is
         // distinguishable on the wire from an empty fp32 array. The payload loop
         // simply runs zero times when the array is empty.
         writeVarint((8L << 3) | FixlenType.FP64.raw());
+        int p = offset;
+        if ((long) end - p >= (long) data.length * 8) {
+            byte[] b = buffer;
+            for (double v : data) {
+                LE_LONG.set(b, p, Double.doubleToRawLongBits(v));
+                p += 8;
+            }
+            offset = p;
+            return;
+        }
         for (double v : data) {
             putLe64(Double.doubleToRawLongBits(v));
         }
@@ -1012,17 +1101,24 @@ public final class OStream {
         if (id < 0 || id > ID_MAX) {
             throw new SofabException(SofabError.ARGUMENT, "id " + id);
         }
-        if (pending == null) {
-            // First hold-back on this stream: an encoder that never opens a
-            // sequence never allocates here at all.
-            pending = new int[PENDING_INITIAL];
-        } else if (nPending == pending.length) {
-            // Grow rather than fall back to eager framing. nPending <= depth <
-            // MAX_DEPTH, so the run can never need more than MAX_DEPTH slots.
-            int grown = Math.min(pending.length * 2, Sofab.MAX_DEPTH);
-            pending = Arrays.copyOf(pending, grown);
+        if (nPending == 0) {
+            // Depth-one hold-back: a scalar, so an encoder whose sequences never
+            // nest never allocates the overflow array at all.
+            pending0 = id;
+            nPending = 1;
+        } else {
+            int slot = nPending - 1; // pending[] carries entries two and beyond
+            if (pending == null) {
+                pending = new int[PENDING_INITIAL];
+            } else if (slot == pending.length) {
+                // Grow rather than fall back to eager framing. nPending <= depth <
+                // MAX_DEPTH, so the run can never need more than MAX_DEPTH slots.
+                int grown = Math.min(pending.length * 2, Sofab.MAX_DEPTH);
+                pending = Arrays.copyOf(pending, grown);
+            }
+            pending[slot] = id;
+            nPending++;
         }
-        pending[nPending++] = id;
         depth++;
     }
 
