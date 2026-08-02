@@ -44,6 +44,16 @@ public final class Perf {
     private static final ThreadMXBean THREADS = ManagementFactory.getThreadMXBean();
     private static final double MIN_SECONDS = 1.0;
 
+    /**
+     * How long one batch of operations runs before the clock is read again.
+     * {@code getCurrentThreadCpuTime()} costs on the order of a microsecond,
+     * so reading it once per operation times the clock rather than the codec
+     * on cheap workloads — it lands in {@code CPU time/op} and MB/s alike.
+     * Ten milliseconds of work per read keeps the measurement under ~0.01%
+     * of a batch.
+     */
+    private static final double BATCH_SECONDS = 0.01;
+
     // --- message under test (identical to perf.c / perf.rs) ----------------
     private static final String PERF_STRING = "perf-benchmark-message";
     private static final int[] PERF_SAMPLES =
@@ -137,12 +147,28 @@ public final class Perf {
         }
         int msg = perfEncode(buf);
 
+        // Grow a batch until it spans BATCH_SECONDS, so the clock read that
+        // ends it is a rounding error against the work it timed.
+        long batch = 1;
+        for (;;) {
+            double c0 = cpuNow();
+            for (long k = 0; k < batch; k++) {
+                sink += perfEncode(buf);
+            }
+            if (cpuNow() - c0 >= BATCH_SECONDS) {
+                break;
+            }
+            batch *= 2;
+        }
+
         long it = 0;
         double t0 = cpuNow();
         double el;
         do {
-            sink += perfEncode(buf);
-            it++;
+            for (long k = 0; k < batch; k++) {
+                sink += perfEncode(buf);
+            }
+            it += batch;
             el = cpuNow() - t0;
         } while (el < MIN_SECONDS);
         BLACKHOLE = sink;
@@ -162,14 +188,33 @@ public final class Perf {
             sink += o.acc;
         }
 
+        // Grow a batch until it spans BATCH_SECONDS, so the clock read that
+        // ends it is a rounding error against the work it timed. The per-op
+        // PerfOut allocation stays inside the batch — it is part of the op.
+        long batch = 1;
+        for (;;) {
+            double c0 = cpuNow();
+            for (long k = 0; k < batch; k++) {
+                PerfOut o = new PerfOut();
+                perfDecode(buf, len, o);
+                sink += o.acc;
+            }
+            if (cpuNow() - c0 >= BATCH_SECONDS) {
+                break;
+            }
+            batch *= 2;
+        }
+
         long it = 0;
         double t0 = cpuNow();
         double el;
         do {
-            PerfOut o = new PerfOut();
-            perfDecode(buf, len, o);
-            sink += o.acc;
-            it++;
+            for (long k = 0; k < batch; k++) {
+                PerfOut o = new PerfOut();
+                perfDecode(buf, len, o);
+                sink += o.acc;
+            }
+            it += batch;
             el = cpuNow() - t0;
         } while (el < MIN_SECONDS);
         BLACKHOLE = sink;

@@ -77,17 +77,42 @@ public final class Bench {
         void run() throws IOException;
     }
 
+    /**
+     * How long one batch of operations runs before the clock is read again.
+     * {@code getCurrentThreadCpuTime()} costs on the order of a microsecond,
+     * so reading it once per operation times the clock rather than the codec
+     * on the cheap workloads. Ten milliseconds of work per read keeps the
+     * measurement under ~0.01% of a batch.
+     */
+    private static final double BATCH_SECONDS = 0.01;
+
+    /** Grow a batch until it spans {@link #BATCH_SECONDS}. */
+    private static long calibrateBatch(Body body) throws IOException {
+        for (long batch = 1; ; batch *= 2) {
+            double t0 = cpuNow();
+            for (long k = 0; k < batch; k++) {
+                body.run();
+            }
+            if (cpuNow() - t0 >= BATCH_SECONDS) {
+                return batch;
+            }
+        }
+    }
+
     /** Run {@code body} for ~1 s of CPU time (after warmup) -> MB/s. */
     private static double measure(int bytes, Body body) throws IOException {
         for (int i = 0; i < 200_000; i++) {
             body.run(); // warmup / JIT
         }
+        long batch = calibrateBatch(body);
         long it = 0;
         double t0 = cpuNow();
         double el;
         do {
-            body.run();
-            it++;
+            for (long k = 0; k < batch; k++) {
+                body.run();
+            }
+            it += batch;
             el = cpuNow() - t0;
         } while (el < MIN_SECONDS);
         return (double) bytes * it / el / 1e6;
