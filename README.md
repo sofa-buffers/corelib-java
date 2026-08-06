@@ -120,6 +120,8 @@ class My implements Visitor {
     @Override public void signed(int id, long v)   { if (id == 2) b = v; }
     // fp32(), fp64(), string(), blob(), arrayBegin(), sequenceBegin(), ... as needed
 }
+// fixlenBegin(id, subtype, total) announces a string/blob/float field at its
+// length word, before any payload byte, so a length bound can be rejected there.
 My sink = new My();
 new IStream().feed(buf, 0, used, sink);
 ```
