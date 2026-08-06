@@ -233,6 +233,40 @@ public final class OStream {
         this.offset = offset;
     }
 
+    /**
+     * Return this stream to its just-constructed state, writing into {@code buffer}
+     * from its start, so a caller encoding many messages in a row (a server loop,
+     * the generated {@code encode} helper) can hold one instance instead of letting
+     * each encode allocate and immediately discard one.
+     *
+     * <p>The {@link FlushSink} is <b>not</b> part of what is reset: it is fixed at
+     * construction, so this resets a sink-carrying stream to a sink-carrying one and
+     * a sink-less stream to a sink-less one. Reuse therefore stays within one
+     * output discipline — an instance built for streaming cannot be recycled into a
+     * one-shot encode, or the other way round.
+     *
+     * <p>Unlike {@link #bufferSet} this also clears the sequence nesting depth and
+     * the held-back sequence run. That is the whole point for reuse: a marshal that
+     * threw part-way leaves the depth counter non-zero and can leave sequence
+     * headers pending, and carrying either into the next message on the same thread
+     * would corrupt its nesting validation or prepend a stale {@code sequence start}
+     * to it — three bytes instead of two for one open sequence, and 498 instead of
+     * four at {@link Sofab#MAX_DEPTH}.
+     *
+     * <p>The {@link #pending} array keeps its allocation: retaining it is the point
+     * of reuse, and it is never read while {@link #nPending} is zero, which is
+     * cleared here. Everything else this class declares is restored, and
+     * {@code ResetCoversEveryFieldTest} holds that to every field added later.
+     *
+     * @param buffer caller-owned output buffer (length &gt; 0)
+     */
+    public void reset(byte[] buffer) {
+        bufferSet(buffer, 0);
+        this.depth = 0;
+        this.nPending = 0;
+        this.pending0 = 0;
+    }
+
     // --- primitives ---------------------------------------------------------
 
     /** Hand the full buffer to the sink and resume at its start, or fail if none. */
