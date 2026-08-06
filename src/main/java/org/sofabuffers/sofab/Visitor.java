@@ -21,7 +21,9 @@ package org.sofabuffers.sofab;
  * input chunk size (and even RAM); each chunk reports the field {@code total}
  * length and the byte {@code offset} of the chunk within the field. Array
  * elements are announced once via {@link #arrayBegin} and then delivered through
- * the scalar / float callbacks with the same {@code id}.
+ * the scalar / float callbacks with the same {@code id}. A fixlen field —
+ * string, blob, fp32 or fp64 — is announced once via {@link #fixlenBegin} at its
+ * length word, before any payload byte.
  *
  * <p><b>Buffer ownership.</b> The {@code data} array handed to {@link #string}
  * and {@link #blob} is the caller's input buffer; it is only valid for the
@@ -61,6 +63,44 @@ public interface Visitor {
      * @param value the value
      */
     default void fp64(int id, double value) {
+    }
+
+    /**
+     * Start of a fixlen field — string, blob, fp32 or fp64. Announced once the
+     * {@code fixlen_word} has been read and validated as a format matter, and
+     * before any payload byte is delivered. Called exactly once per fixlen field,
+     * {@code total == 0} included; the payload then follows through
+     * {@link #string} / {@link #blob} (in chunks) or {@link #fp32} /
+     * {@link #fp64} (whole).
+     *
+     * <p><b>Why the decoder announces it here.</b> CORELIB_PLAN §5.2 makes INVALID
+     * dominate INCOMPLETE: once the bytes seen so far are already malformed,
+     * running out of input cannot downgrade the verdict. A {@code maxlen}
+     * violation is fully established by the length word — the number that exceeds
+     * the bound is already on the wire, and no later byte can make it legal. The
+     * payload callbacks carry {@code total} too, but they only fire once payload
+     * bytes exist, so a message truncated immediately after the length word would
+     * produce no event at all and degrade to INCOMPLETE, while the same bytes
+     * arriving in one chunk are INVALID. That is a chunk-boundary-dependent
+     * outcome, which §6.4 and §7.2 item 4 forbid outright. Announcing at the
+     * length word is what lets generated code latch the violation there;
+     * <em>raising</em> from this callback is what turns the field INVALID.
+     *
+     * <p>{@code subtype} is the subtype that <em>arrived</em>, which the corelib
+     * knows, not the one the schema <em>declared</em>, which it does not: a
+     * subtype contradicting the declared field type must be ignored as a
+     * MESSAGE_SPEC §7.3 skip rather than measured against this field's bound —
+     * the same rule {@link #arrayBegin} follows one field kind over.
+     *
+     * <p>This fires for a fixlen <em>field</em> only. A fixlen array's per-element
+     * {@code fixlen_word} is the array's header, and is announced by
+     * {@link #arrayBegin} instead; its elements produce no {@code fixlenBegin}.
+     *
+     * @param id      field id
+     * @param subtype the fixlen subtype read from the wire
+     * @param total   declared payload length in bytes (4 for fp32, 8 for fp64)
+     */
+    default void fixlenBegin(int id, FixlenType subtype, int total) {
     }
 
     /**

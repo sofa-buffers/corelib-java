@@ -45,7 +45,9 @@ import static org.sofabuffers.sofab.WireFormat.zigzagDecode;
  * care about. Scalars and floats are delivered whole; string / blob payloads are
  * delivered in chunks (so they may exceed RAM); array elements are announced
  * with {@link Visitor#arrayBegin} and then delivered through the scalar / float
- * callbacks.
+ * callbacks. Every fixlen field is announced with {@link Visitor#fixlenBegin} at
+ * its length word, before any payload byte, so a length bound can be enforced
+ * there rather than after the payload assembles.
  *
  * <p><b>Three-valued outcome (MESSAGE_SPEC §7).</b> Malformed bytes throw a
  * {@link SofabException} with {@link SofabError#INVALID_MSG} from {@code feed}.
@@ -560,6 +562,10 @@ public final class IStream {
                 if (length != 4) {
                     throw new SofabException(SofabError.INVALID_MSG, "fp32 length " + length);
                 }
+                // §5.2: announce before the payload-availability test below, so a
+                // message ending right here still delivers the header event and can
+                // be judged INVALID rather than decaying to INCOMPLETE.
+                visitor.fixlenBegin(id, FixlenType.FP32, 4);
                 if (end - p < 4) {
                     armFixlenVal(F_FP32, 4);
                     return p;
@@ -570,6 +576,7 @@ public final class IStream {
                 if (length != 8) {
                     throw new SofabException(SofabError.INVALID_MSG, "fp64 length " + length);
                 }
+                visitor.fixlenBegin(id, FixlenType.FP64, 8);
                 if (end - p < 8) {
                     armFixlenVal(F_FP64, 8);
                     return p;
@@ -582,6 +589,8 @@ public final class IStream {
                 fixlenTotal = length;
                 fixlenRemaining = length;
                 accLen = 0;
+                visitor.fixlenBegin(id, subtype == F_STRING ? FixlenType.STRING : FixlenType.BLOB,
+                        length);
                 if (length == 0) {
                     if (subtype == F_STRING) {
                         visitor.string(id, 0, 0, EMPTY, 0, 0);
@@ -1082,9 +1091,14 @@ public final class IStream {
                 // §4.8 step 3: the array's deferred arrayBegin lands here, once the
                 // word is known format-valid and its subtype settled (see
                 // Visitor#arrayBegin). inArray is only true for a fixlen array in
-                // this state; a scalar fixlen field announces nothing.
+                // this state; a scalar fixlen field announces itself instead, and
+                // announces here for the same reason the fast path does (§5.2):
+                // this is the last point before the verdict could decay to
+                // INCOMPLETE on a message that ends at the length word.
                 if (inArray) {
                     arrayBeginFixlen(ArrayKind.FP32, visitor);
+                } else {
+                    visitor.fixlenBegin(id, FixlenType.FP32, 4);
                 }
                 state = afterFixlenWord();
                 break;
@@ -1094,6 +1108,8 @@ public final class IStream {
                 }
                 if (inArray) {
                     arrayBeginFixlen(ArrayKind.FP64, visitor);
+                } else {
+                    visitor.fixlenBegin(id, FixlenType.FP64, 8);
                 }
                 state = afterFixlenWord();
                 break;
@@ -1105,6 +1121,8 @@ public final class IStream {
                 if (inArray) {
                     throw new SofabException(SofabError.INVALID_MSG, "dynamic fixlen array element");
                 }
+                visitor.fixlenBegin(id, subtype == F_STRING ? FixlenType.STRING : FixlenType.BLOB,
+                        length);
                 if (length == 0) {
                     if (subtype == F_STRING) {
                         visitor.string(id, 0, 0, EMPTY, 0, 0);
