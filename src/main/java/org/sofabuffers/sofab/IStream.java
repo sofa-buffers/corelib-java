@@ -323,10 +323,9 @@ public final class IStream {
             }
             int wireType = (int) (header & 0x07);
             long idValue = header >>> 3;
-            // ID_MAX bounds a value-bearing header only (§6.2). A sequence end
-            // carries no value, so its id is discarded whatever it is (§4.9) —
-            // the marker re-encodes as 0x07 either way.
-            if (idValue > ID_MAX && wireType != T_SEQUENCE_END) {
+            // ID_MAX bounds every header's id, sequence end included (§6.2) — the
+            // id is validated where it is read, before any branch on wire type.
+            if (idValue > ID_MAX) {
                 throw new SofabException(SofabError.INVALID_MSG, "id " + idValue);
             }
             final int fieldId = (int) idValue;
@@ -1013,9 +1012,7 @@ public final class IStream {
         long header = varintOut;
         int wireType = (int) (header & 0x07);
         long idValue = header >>> 3;
-        // Same carve-out as the fast path: ID_MAX governs value-bearing headers
-        // (§6.2), never the sequence-end marker (§4.9).
-        if (idValue > ID_MAX && wireType != T_SEQUENCE_END) {
+        if (idValue > ID_MAX) {
             throw new SofabException(SofabError.INVALID_MSG, "id " + idValue);
         }
         id = (int) idValue;

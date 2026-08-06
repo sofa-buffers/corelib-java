@@ -1,19 +1,21 @@
 /*
- * SofaBuffers Java - a sequence-end header's id is discarded, never validated.
+ * SofaBuffers Java - a sequence-end header's id is discarded, but still bounded.
  *
  * CORELIB_PLAN §4.9 makes the marker asymmetric: an encoder MUST emit a sequence
- * end as exactly 0x07, while a decoder MUST accept one carrying *any* id, discard
- * it, and re-encode the marker canonically. §6.2 says the same from the other
- * side: ID_MAX bounds the id of a value-bearing header - unsigned, signed,
- * fixlen, the array types and sequence *start* - and explicitly not the end
- * marker, which has no value space to bound. §7.2 files this under test class 5b,
- * tolerance tests: input that is non-canonical but well-formed must decode to
- * what it denotes rather than INVALID.
+ * end as exactly 0x07, while a decoder MUST discard the id - the marker closes the
+ * innermost open sequence whatever the id says. Discarded is not unvalidated: §6.2
+ * binds the id of *every* field header by ID_MAX, sequence end included, with
+ * deliberately no exception for wire type 7. The bound is on the id's value, not on
+ * its spelling, so a non-minimal encoding of an in-range id stays acceptable under
+ * §4.1 and re-encodes as 0x07 like any other non-minimal varint.
  *
- * Both decode surfaces are covered here, because the ceiling used to be applied
- * on both: the contiguous fast path in IStream.feed and the resumable state
- * machine reached at a chunk boundary (§6.5 - "a guard added to one surface but
- * not another").
+ * §7.2 asks for both directions, and specifically for the oversized id on a
+ * sequence-end header rather than only on a value-bearing one: an implementation
+ * that validates the id in the branches that *use* it passes the value-bearing case
+ * and misses this one. Both decode surfaces are covered, because the check lives on
+ * both: the contiguous fast path in IStream.feed and the resumable state machine
+ * reached at a chunk boundary (§6.5 - "a guard added to one surface but not
+ * another").
  *
  * SPDX-License-Identifier: MIT
  */
@@ -30,9 +32,9 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.sofabuffers.sofab.common.RecordingVisitor;
 
-class SequenceEndIdToleranceTest {
+class SequenceEndIdTest {
 
-    /** One past ID_MAX: the id the ceiling used to reject on an end marker. */
+    /** One past ID_MAX: rejected on an end marker exactly as anywhere else. */
     private static final long OVER_ID_MAX = 1L << 31;
 
     private static byte[] bytes(int... values) {
@@ -105,7 +107,7 @@ class SequenceEndIdToleranceTest {
         return ex.error();
     }
 
-    // --- the reproducer -----------------------------------------------------
+    // --- the ceiling binds a sequence-end header too (§6.2) -------------------
 
     @Test
     void headerHelperMatchesTheIsolateBytes() {
@@ -115,83 +117,61 @@ class SequenceEndIdToleranceTest {
     }
 
     @Test
-    void overIdMaxIdOnSequenceEndAccepted() throws SofabException {
-        // An unknown id opened as a sequence, closed by an oversized end marker.
+    void overIdMaxIdOnSequenceEndRejected() {
+        // An unknown id opened as a sequence, closed by an over-ceiling end marker.
         byte[] isolate = bytes(0x76, 0x87, 0x80, 0x80, 0x80, 0x40);
-        assertEquals(List.of("seq{:14", "seq}"), decode(isolate));
-        assertEquals(List.of("seq{:14", "seq}"), decodeByteByByte(isolate));
+        assertEquals(SofabError.INVALID_MSG, errorOf(isolate));
+        assertEquals(SofabError.INVALID_MSG, errorOfChunked(isolate));
     }
 
     @Test
-    void largestPossibleIdOnSequenceEndAccepted() throws SofabException {
-        // The id sub-field of a 10-byte header varint tops out at 2^61 - 1; even
-        // that is discarded. Only §4.1's 64-bit bound on the varint itself is left.
+    void largestPossibleIdOnSequenceEndRejected() {
+        // The id sub-field of a 10-byte header varint tops out at 2^61 - 1. §4.1's
+        // 64-bit bound lets that varint through; §6.2's ceiling is what rejects it.
         byte[] msg = concat(bytes(0x0E), header((1L << 61) - 1, WireFormat.T_SEQUENCE_END));
-        assertEquals(List.of("seq{:1", "seq}"), decode(msg));
-        assertEquals(List.of("seq{:1", "seq}"), decodeByteByByte(msg));
+        assertEquals(SofabError.INVALID_MSG, errorOf(msg));
+        assertEquals(SofabError.INVALID_MSG, errorOfChunked(msg));
     }
 
     @Test
-    void overIdMaxIdOnSequenceEndAcceptedWhenNested() throws SofabException {
-        // Every closing marker of a nested run carries an over-ceiling id.
+    void overIdMaxIdOnNestedSequenceEndRejected() {
+        // The inner closing marker of a nested run: rejected at the depth it sits at.
         byte[] end = header(OVER_ID_MAX, WireFormat.T_SEQUENCE_END);
-        byte[] msg = concat(bytes(0x0E, 0x16), bytes(0x00, 0x2A), end, end);
-        assertEquals(List.of("seq{:1", "seq{:2", "u:0=42", "seq}", "seq}"), decode(msg));
-        assertEquals(List.of("seq{:1", "seq{:2", "u:0=42", "seq}", "seq}"), decodeByteByByte(msg));
-    }
-
-    // --- controls: these passed before the fix and must keep passing ---------
-
-    @Test
-    void canonicalSequenceEndStillAccepted() throws SofabException {
-        byte[] msg = bytes(0x0E, 0x07);
-        assertEquals(List.of("seq{:1", "seq}"), decode(msg));
-        assertEquals(List.of("seq{:1", "seq}"), decodeByteByByte(msg));
+        byte[] msg = concat(bytes(0x0E, 0x16), bytes(0x00, 0x2A), end, bytes(0x07));
+        assertEquals(SofabError.INVALID_MSG, errorOf(msg));
+        assertEquals(SofabError.INVALID_MSG, errorOfChunked(msg));
     }
 
     @Test
-    void smallNonZeroIdOnSequenceEndStillAccepted() throws SofabException {
-        byte[] msg = concat(bytes(0x0E), header(3, WireFormat.T_SEQUENCE_END));
-        assertEquals(List.of("seq{:1", "seq}"), decode(msg));
-        assertEquals(List.of("seq{:1", "seq}"), decodeByteByByte(msg));
-    }
-
-    @Test
-    void idAtIdMaxOnSequenceEndStillAccepted() throws SofabException {
-        byte[] msg = concat(bytes(0x0E), header(WireFormat.ID_MAX, WireFormat.T_SEQUENCE_END));
-        assertEquals(List.of("seq{:1", "seq}"), decode(msg));
-        assertEquals(List.of("seq{:1", "seq}"), decodeByteByByte(msg));
-    }
-
-    @Test
-    void danglingSequenceEndStillRejectedWhateverItsId() {
-        // §5.2's only sequence-end INVALID condition: no open sequence. The id
-        // being unbounded does not make the marker structurally free.
+    void danglingSequenceEndRejectedWhateverItsId() {
+        // §5.2's structural sequence-end condition: no open sequence.
+        assertEquals(SofabError.INVALID_MSG, errorOf(bytes(0x07)));
+        assertEquals(SofabError.INVALID_MSG, errorOfChunked(bytes(0x07)));
         byte[] dangling = header(OVER_ID_MAX, WireFormat.T_SEQUENCE_END);
         assertEquals(SofabError.INVALID_MSG, errorOf(dangling));
         assertEquals(SofabError.INVALID_MSG, errorOfChunked(dangling));
     }
 
     @Test
-    void overlongHeaderVarintStillRejectedOnSequenceEnd() {
-        // §4.1 still bounds the header encoding: 11 continuation bytes overflow
-        // the 64-bit varint whatever wire type they would have decoded to.
+    void overlongHeaderVarintRejectedOnSequenceEnd() {
+        // §4.1 bounds the header encoding: 11 continuation bytes overflow the
+        // 64-bit varint whatever wire type they would have decoded to.
         byte[] bad = bytes(0x0E, 0x87, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80);
         assertEquals(SofabError.INVALID_MSG, errorOf(bad));
         assertEquals(SofabError.INVALID_MSG, errorOfChunked(bad));
     }
 
-    // --- the ceiling still binds a value-bearing header ----------------------
+    // --- the same ceiling on a value-bearing header --------------------------
 
     @Test
-    void overIdMaxIdOnUnsignedStillRejected() {
-        byte[] bad = header(OVER_ID_MAX, WireFormat.T_VARINT_UNSIGNED);
-        assertEquals(SofabError.INVALID_MSG, errorOf(concat(bad, bytes(0x00))));
-        assertEquals(SofabError.INVALID_MSG, errorOfChunked(concat(bad, bytes(0x00))));
+    void overIdMaxIdOnUnsignedRejected() {
+        byte[] bad = concat(header(OVER_ID_MAX, WireFormat.T_VARINT_UNSIGNED), bytes(0x00));
+        assertEquals(SofabError.INVALID_MSG, errorOf(bad));
+        assertEquals(SofabError.INVALID_MSG, errorOfChunked(bad));
     }
 
     @Test
-    void overIdMaxIdOnUnsignedInsideSkippedSubtreeStillRejected() {
+    void overIdMaxIdOnUnsignedInsideSkippedSubtreeRejected() {
         // Same header one level down, inside the unknown sequence the corelib
         // walks without any schema knowledge.
         byte[] bad = concat(bytes(0x76), header(OVER_ID_MAX, WireFormat.T_VARINT_UNSIGNED), bytes(0x00, 0x07));
@@ -200,12 +180,46 @@ class SequenceEndIdToleranceTest {
     }
 
     @Test
-    void overIdMaxIdOnSequenceStartStillRejected() {
-        // Sequence *start* is value-bearing - its id names a field - so §6.2's
-        // ceiling does govern it.
+    void overIdMaxIdOnSequenceStartRejected() {
         byte[] bad = header(OVER_ID_MAX, WireFormat.T_SEQUENCE_START);
         assertEquals(SofabError.INVALID_MSG, errorOf(bad));
         assertEquals(SofabError.INVALID_MSG, errorOfChunked(bad));
+    }
+
+    // --- tolerance: an in-range id, however spelled (§4.9, §4.1) -------------
+
+    @Test
+    void canonicalSequenceEndAccepted() throws SofabException {
+        byte[] msg = bytes(0x0E, 0x07);
+        assertEquals(List.of("seq{:1", "seq}"), decode(msg));
+        assertEquals(List.of("seq{:1", "seq}"), decodeByteByByte(msg));
+    }
+
+    @Test
+    void nonZeroIdWithinIdMaxOnSequenceEndAccepted() throws SofabException {
+        // §7.2's tolerance case: the id is discarded, so an id of 3 closes the
+        // sequence exactly as 0 does.
+        byte[] msg = concat(bytes(0x0E), header(3, WireFormat.T_SEQUENCE_END));
+        assertEquals(List.of("seq{:1", "seq}"), decode(msg));
+        assertEquals(List.of("seq{:1", "seq}"), decodeByteByByte(msg));
+    }
+
+    @Test
+    void idAtIdMaxOnSequenceEndAccepted() throws SofabException {
+        // The ceiling itself is in range - the boundary the rejection tests sit
+        // one past.
+        byte[] msg = concat(bytes(0x0E), header(WireFormat.ID_MAX, WireFormat.T_SEQUENCE_END));
+        assertEquals(List.of("seq{:1", "seq}"), decode(msg));
+        assertEquals(List.of("seq{:1", "seq}"), decodeByteByByte(msg));
+    }
+
+    @Test
+    void nonMinimalSpellingOfIdZeroAccepted() throws SofabException {
+        // §4.9 names this one: 87 00 is id 0, wire type 7, written in two bytes
+        // where one would do. The bound is on the value, not on the spelling.
+        byte[] msg = bytes(0x0E, 0x87, 0x00);
+        assertEquals(List.of("seq{:1", "seq}"), decode(msg));
+        assertEquals(List.of("seq{:1", "seq}"), decodeByteByByte(msg));
     }
 
     // --- re-encode ----------------------------------------------------------
@@ -254,39 +268,12 @@ class SequenceEndIdToleranceTest {
     }
 
     @Test
-    void oversizedEndMarkerReencodesAsCanonicalSeven() throws SofabException {
-        // §4.9: the discarded id is normalized away, exactly as a non-minimal
-        // varint is - the marker comes back out as the single byte 0x07.
-        byte[] in = concat(bytes(0x76), bytes(0x00, 0x2A), header(OVER_ID_MAX, WireFormat.T_SEQUENCE_END));
+    void inRangeEndMarkerReencodesAsCanonicalSeven() throws SofabException {
+        // §4.9: an accepted end marker comes back out as the single byte 0x07,
+        // whatever id it carried and however that id was spelled.
+        byte[] in = concat(bytes(0x76), bytes(0x00, 0x2A), header(3, WireFormat.T_SEQUENCE_END));
         assertArrayEquals(bytes(0x76, 0x00, 0x2A, 0x07), reencode(in));
-    }
-
-    @Test
-    void oversizedEndMarkerOnEmptySequenceReencodesToTheEmptyMessage() throws SofabException {
-        // The isolate itself: an unknown, contentless sequence. A lazy begin
-        // dropped by an end that receives no content leaves nothing on the wire.
-        byte[] buf = new byte[64];
-        OStream os = new OStream(buf);
-        Visitor v = new Visitor() {
-            @Override
-            public void sequenceBegin(int id) {
-                try {
-                    os.writeSequenceBeginLazy(id);
-                } catch (IOException e) {
-                    throw new AssertionError(e);
-                }
-            }
-
-            @Override
-            public void sequenceEnd() {
-                try {
-                    os.writeSequenceEnd();
-                } catch (IOException e) {
-                    throw new AssertionError(e);
-                }
-            }
-        };
-        new IStream().feed(bytes(0x76, 0x87, 0x80, 0x80, 0x80, 0x40), v);
-        assertEquals(0, os.bytesUsed());
+        byte[] nonMinimal = bytes(0x76, 0x00, 0x2A, 0x87, 0x00);
+        assertArrayEquals(bytes(0x76, 0x00, 0x2A, 0x07), reencode(nonMinimal));
     }
 }
