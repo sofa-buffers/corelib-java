@@ -254,11 +254,10 @@ public final class IStream {
         depth = 0;
         invalid = false;
         machineBytes = 0;
-        // Pure scratch — every path writes these before it reads them — but cleared
+        // Pure scratch — every path writes it before it reads it — but cleared
         // anyway so "reset restores every declared field" needs no exception for
-        // them, and the reflective guard can hold the whole class to it.
+        // it, and the reflective guard can hold the whole class to it.
         scratchPos = 0;
-        tailBits = 0;
     }
 
     /**
@@ -404,8 +403,15 @@ public final class IStream {
                     header = wideVarint(data, p, w);
                     p = scratchPos;
                 }
+            } else if (data[p] >= 0) {
+                // Single-byte varint in the buffer's last nine bytes: the shape
+                // every small id takes, read without the out-of-line reader and its
+                // hand-back field. `i < end` is the loop's own condition, so the
+                // byte is there.
+                header = data[p];
+                p = i + 1;
             } else {
-                header = boundedVarint(data, p, end);
+                header = readWord(data, p, end);
                 p = scratchPos;
                 if (p < 0) {
                     // Header runs past the buffer: hand this byte to the state
@@ -441,8 +447,11 @@ public final class IStream {
                         val = wideVarint(data, p, w);
                         p = scratchPos;
                     }
+                } else if (p < end && data[p] >= 0) {
+                    val = data[p];
+                    p++;
                 } else {
-                    val = boundedVarint(data, p, end);
+                    val = readWord(data, p, end);
                     int q = scratchPos;
                     if (q < 0) {
                         // Value spills past the buffer: the machine reads it from p.
@@ -563,37 +572,14 @@ public final class IStream {
             return gather7(w & (-1L >>> (63 - nz)));
         }
         long v = gather7(w);
-        scratchPos = finishLongVarint(data, p);
-        return v | tailBits;
-    }
-
-    /**
-     * Read a varint from the last few bytes of the buffer, where the
-     * eight-at-a-time path has no room — a field header, a scalar value or an
-     * array element alike, since the hand-over condition is the same one at all
-     * three sites. Fewer than ten bytes remain, so at most nine can be read and no
-     * {@code >64}-bit varint can complete here — the overflow test lives only on
-     * the ten-byte path. Leaves the next position in {@link #scratchPos}, or
-     * {@code -1} there when the varint runs past {@code end}.
-     *
-     * <p>Kept out of line: folding it into the element loops enlarges them enough
-     * to cost the hot eight-at-a-time path registers, and one shared out-of-line
-     * reader buys that just as well as one per caller.
-     */
-    private long boundedVarint(byte[] data, int p, int end) {
-        long v = 0;
-        int shift = 0;
-        while (p < end) {
-            int b = data[p++] & 0xFF;
-            v |= ((long) (b & 0x7F)) << shift;
-            shift += 7;
-            if ((b & 0x80) == 0) {
-                scratchPos = p;
-                return v;
-            }
+        int b8 = data[p + 8];
+        v |= (long) (b8 & 0x7F) << 56;
+        if (b8 >= 0) {
+            scratchPos = p + 9;
+            return v;
         }
-        scratchPos = -1;
-        return 0;
+        scratchPos = p + 10;
+        return v | tenthByte(data, p);
     }
 
     /**
@@ -630,18 +616,27 @@ public final class IStream {
     }
 
     /**
-     * Read a varint that is <em>not</em> on the per-element hot path (a fixlen_word
-     * or an array element count) from {@code data[i..end)}.
+     * The decoder's one bounded varint reader: consume a varint from
+     * {@code data[i..end)} wherever the buffer might end inside it — a field header,
+     * a scalar value or an array element in the last nine bytes, and a
+     * {@code fixlen_word} or array count anywhere.
      *
-     * <p>The word itself is the return value — every 64-bit pattern is a legal one,
+     * <p>The value itself is the return value — every 64-bit pattern is a legal one,
      * so completion is signalled out of band: {@link #scratchPos} is left at the
-     * position just past the word, or set to {@code -1} when the word runs past
+     * position just past the varint, or set to {@code -1} when it runs past
      * {@code end} and the caller must arm the state machine.
      *
      * <p>The {@code >64}-bit overflow test (§4.1/§6.3) can only fire on the tenth
      * byte — the sole shift (63) at which a payload bit spills past bit 63 — so it
      * is tested as {@code shift == 63} rather than recomputed from a per-byte
      * {@code room} subtraction.
+     *
+     * <p>Kept out of line, and the only reader: every caller short-circuits the
+     * one-byte form before reaching it, so what arrives here is the rare
+     * multi-byte-near-the-boundary case. A second, check-free copy for the hot sites
+     * used to sit alongside it and <em>cost</em> them — two similar readers inlined
+     * into the array element loops measured 12% worse on the 1000-element u64 decode
+     * than this one does.
      */
     private long readWord(byte[] data, int i, int end) throws SofabException {
         long v = 0;
@@ -675,37 +670,27 @@ public final class IStream {
      */
     private int scratchPos;
 
-    /** Bits 56..63 contributed by the ninth/tenth byte of a long varint. */
-    private long tailBits;
-
     /**
-     * Finish a varint whose first eight bytes all carried a continuation bit by
-     * consuming the ninth — and, if that one continues too, the tenth — byte at
-     * {@code p + 8}. Their contribution to bits 56..63 is left in
-     * {@link #tailBits}; the return value is the position just past the varint.
+     * Value contributed by the <em>tenth</em> byte of a maximal varint, at
+     * {@code p + 9}, once the ninth byte at {@code p + 8} has been found to carry a
+     * continuation flag. Bit 63 is the only value bit left at that point, so this
+     * byte's payload is 0 or 1 and anything else — a higher payload bit, or an
+     * eleventh byte implied by a continuation flag — exceeds the 64-bit value range
+     * and is malformed (§4.1/§6.3). This is the only place a varint can do so.
      *
-     * <p>The caller guarantees ten readable bytes from {@code p}, so this never
-     * runs short. It is the only place a varint can exceed the 64-bit value range,
-     * and both overlong forms — a tenth byte with a payload bit above bit 0, and an
-     * eleventh byte implied by a tenth that still continues — are rejected here
-     * (§4.1/§6.3).
+     * <p>The ninth byte itself is read by each caller inline rather than here: it
+     * ends the varint in the common case, and returning both its contribution and
+     * the new position from one call meant handing one of them back through a field
+     * that the caller then reloaded — a store/load per long array element. The
+     * caller guarantees ten readable bytes from {@code p}, so no length test is
+     * needed on either byte.
      */
-    private int finishLongVarint(byte[] data, int p) throws SofabException {
-        int b = data[p + 8];
-        long bits = (long) (b & 0x7F) << 56;
-        if (b >= 0) {
-            tailBits = bits;
-            return p + 9;
-        }
-        b = data[p + 9];
-        if (((b & 0x7F) >>> 1) != 0) {
+    private static long tenthByte(byte[] data, int p) throws SofabException {
+        int b = data[p + 9];
+        if ((b & 0xFE) != 0) {
             throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
         }
-        if (b < 0) {
-            throw new SofabException(SofabError.INVALID_MSG, "varint overflow");
-        }
-        tailBits = bits | ((long) (b & 0x7F) << 63);
-        return p + 10;
+        return (long) b << 63;
     }
 
     /**
@@ -804,23 +789,37 @@ public final class IStream {
             case F_STRING:
             case F_BLOB:
             default: // the check above leaves 0..3, so these two are what remains
+                boolean isString = subtype == F_STRING;
                 fixlenSubtype = subtype;
                 fixlenTotal = length;
                 fixlenRemaining = length;
                 accLen = 0;
-                visitor.fixlenBegin(id, subtype == F_STRING ? FixlenType.STRING : FixlenType.BLOB,
-                        length);
+                visitor.fixlenBegin(id, isString ? FixlenType.STRING : FixlenType.BLOB, length);
                 if (length == 0) {
-                    if (subtype == F_STRING) {
+                    if (isString) {
                         visitor.string(id, 0, 0, EMPTY, 0, 0);
                     } else {
                         visitor.blob(id, 0, 0, EMPTY, 0, 0);
                     }
                     state = S_IDLE;
-                } else {
-                    state = S_FIXLEN_RAW; // feed loop streams the payload in bulk
+                    return p;
                 }
-                return p;
+                state = S_FIXLEN_RAW; // the payload streams in chunks from here
+                if (end - p < length) {
+                    return p; // it straddles: resume() takes the rest chunk by chunk
+                }
+                // The whole payload is in hand, which is the one-shot case and the
+                // common streaming one alike. Deliver it here rather than returning
+                // to the feed loop only to be dispatched straight back in: the
+                // callback and the window handed to it are identical either way.
+                if (isString) {
+                    visitor.string(id, length, 0, data, p, length);
+                } else {
+                    visitor.blob(id, length, 0, data, p, length);
+                }
+                fixlenRemaining = 0;
+                state = S_IDLE;
+                return p + length;
         }
     }
 
@@ -828,10 +827,11 @@ public final class IStream {
      * Fast path for an unsigned/signed varint array; {@code i} points at the count.
      *
      * <p>The element loop is specialised per signedness rather than testing a flag
-     * inside it. The two loops are otherwise identical, but a shared one would
-     * carry the test — and the ZigZag decision — into every iteration unless the
-     * JIT happened to inline this method into its caller and constant-fold the
-     * flag; splitting them makes the hot loop independent of that.
+     * inside it. The two loops are otherwise identical, and folding them into one
+     * that takes the flag reads better — but the flag does not fold away even though
+     * every call site passes a constant, and the shared loop measures <b>+4.4%</b>
+     * Ir/op on the 1000-element u64 decode (58 047 → 60 605). The duplication is
+     * bought, not accidental.
      */
     private int fastVarintArray(byte[] data, int i, int end, Visitor visitor, boolean signed)
             throws SofabException {
@@ -868,12 +868,22 @@ public final class IStream {
                         p += (nz >>> 3) + 1;
                     } else {
                         val = gather7(w);
-                        p = finishLongVarint(data, p);
-                        val |= tailBits;
+                        int b8 = data[p + 8];
+                        val |= (long) (b8 & 0x7F) << 56;
+                        if (b8 >= 0) {
+                            p += 9;
+                        } else {
+                            val |= tenthByte(data, p);
+                            p += 10;
+                        }
                     }
                 }
+            } else if (p < end && data[p] >= 0) {
+                // Single-byte element in the buffer's last nine bytes.
+                val = data[p];
+                p++;
             } else {
-                long tail = boundedVarint(data, p, end);
+                long tail = readWord(data, p, end);
                 if (scratchPos < 0) {
                     // Element spills past the buffer: machine finishes it from p. The
                     // straddling element is still uncounted, so write back its count.
@@ -915,12 +925,22 @@ public final class IStream {
                         p += (nz >>> 3) + 1;
                     } else {
                         val = gather7(w);
-                        p = finishLongVarint(data, p);
-                        val |= tailBits;
+                        int b8 = data[p + 8];
+                        val |= (long) (b8 & 0x7F) << 56;
+                        if (b8 >= 0) {
+                            p += 9;
+                        } else {
+                            val |= tenthByte(data, p);
+                            p += 10;
+                        }
                     }
                 }
+            } else if (p < end && data[p] >= 0) {
+                // Single-byte element in the buffer's last nine bytes.
+                val = data[p];
+                p++;
             } else {
-                long tail = boundedVarint(data, p, end);
+                long tail = readWord(data, p, end);
                 if (scratchPos < 0) {
                     // Element spills past the buffer: machine finishes it from p. The
                     // straddling element is still uncounted, so write back its count.
@@ -1368,18 +1388,13 @@ public final class IStream {
             return;
         }
 
+        // The carry buffer is a plain byte[], so the same little-endian views the
+        // one-shot path reads the wire with decode it here — one read each instead
+        // of a shift/or chain and a loop, and the two paths cannot drift.
         if (fixlenSubtype == F_FP32) {
-            int bits = (a[0] & 0xFF)
-                    | ((a[1] & 0xFF) << 8)
-                    | ((a[2] & 0xFF) << 16)
-                    | ((a[3] & 0xFF) << 24);
-            visitor.fp32(id, Float.intBitsToFloat(bits));
+            visitor.fp32(id, Float.intBitsToFloat((int) LE_INT.get(a, 0)));
         } else {
-            long bits = 0;
-            for (int i = 0; i < 8; i++) {
-                bits |= ((long) (a[i] & 0xFF)) << (i * 8);
-            }
-            visitor.fp64(id, Double.longBitsToDouble(bits));
+            visitor.fp64(id, Double.longBitsToDouble((long) LE_LONG.get(a, 0)));
         }
 
         // Next array element (reuse the element size) or back to idle.

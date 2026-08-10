@@ -45,13 +45,17 @@ import static org.sofabuffers.sofab.WireFormat.zigzagEncode;
  * the value outright. Raw string / blob payloads are copied in bulk up to each
  * buffer boundary. The wire output is identical regardless of buffer size.
  *
- * <p>A multi-byte varint is assembled in a register and written with a single
- * eight-byte store, so the encoder may leave up to seven <b>scratch bytes</b> in
- * the buffer immediately after the current write position. They are never part of
- * the message and never escape: they sit strictly between {@link #bytesUsed()} and
- * the end of the buffer, are overwritten by the next write, and only
- * {@code [0, bytesUsed())} is ever handed to a {@link FlushSink}. Bytes before the
- * starting {@code offset} — the region reserved for a lower-layer header — are
+ * <p>A field is written with as few stores as its shape allows: a multi-byte
+ * varint is assembled in a register and written with one eight-byte store, a
+ * one-byte header and one-byte value go out together as one two-byte store, and a
+ * whole {@code fp32} field — header, {@code fixlen_word} and payload — fits one
+ * eight-byte store. A store may therefore reach past the field it wrote, leaving
+ * up to seven <b>scratch bytes</b> in the buffer immediately after the current
+ * write position. They are never part of the message and never escape: they sit
+ * strictly between {@link #bytesUsed()} and the end of the buffer, are overwritten
+ * by the next write, and only {@code [0, bytesUsed())} is ever handed to a
+ * {@link FlushSink}. Bytes before the starting {@code offset} — the region
+ * reserved for a lower-layer header — are
  * never touched. A buffer with fewer than ten bytes free falls back to the
  * byte-at-a-time path, so small buffers see no scratch writes at all.
  *
@@ -99,6 +103,8 @@ public final class OStream {
             MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.LITTLE_ENDIAN);
     private static final VarHandle LE_LONG =
             MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
+    private static final VarHandle LE_SHORT =
+            MethodHandles.byteArrayViewVarHandle(short[].class, ByteOrder.LITTLE_ENDIAN);
 
     /** One per byte lane: the continuation bit of each of eight varint bytes. */
     private static final long CONT_BITS = 0x8080_8080_8080_8080L;
@@ -495,7 +501,16 @@ public final class OStream {
         int p = offset;
         if (end - p >= FIELD_ROOM) {
             byte[] b = buffer;
-            offset = putVarint(b, putVarint(b, p, ((long) id << 3) | wireType), value);
+            long header = ((long) id << 3) | wireType;
+            if (((header | value) & ~0x7FL) == 0) {
+                // Both halves are one byte — an id below 16 with a small value,
+                // which is most of a typical message — so the whole field is one
+                // two-byte store instead of two bounds-checked single-byte ones.
+                LE_SHORT.set(b, p, (short) (header | (value << 8)));
+                offset = p + 2;
+                return;
+            }
+            offset = putVarint(b, putVarint(b, p, header), value);
             return;
         }
         writeVarint(((long) id << 3) | wireType);
@@ -602,7 +617,19 @@ public final class OStream {
         // Header (<=5) + the constant one-byte fixlen_word + four payload bytes.
         if (end - p >= FIELD_ROOM) {
             byte[] b = buffer;
-            p = putVarint(b, p, ((long) id << 3) | T_FIXLEN);
+            long header = ((long) id << 3) | T_FIXLEN;
+            if ((header & ~0x7FL) == 0) {
+                // Six bytes — a one-byte header, the constant fixlen_word and the
+                // payload — fit one eight-byte store, so the commonest float field
+                // costs a single bounds-checked write. FIELD_ROOM covers the two
+                // scratch bytes past it.
+                LE_LONG.set(b, p, header
+                        | ((long) ((4 << 3) | FixlenType.FP32.raw()) << 8)
+                        | ((bits & 0xFFFF_FFFFL) << 16));
+                offset = p + 6;
+                return;
+            }
+            p = putVarint(b, p, header);
             b[p] = (byte) ((4 << 3) | FixlenType.FP32.raw());
             LE_INT.set(b, p + 1, bits);
             offset = p + 5;
@@ -627,7 +654,17 @@ public final class OStream {
         // Header (<=5) + the constant one-byte fixlen_word + eight payload bytes.
         if (end - p >= FIELD_ROOM) {
             byte[] b = buffer;
-            p = putVarint(b, p, ((long) id << 3) | T_FIXLEN);
+            long header = ((long) id << 3) | T_FIXLEN;
+            if ((header & ~0x7FL) == 0) {
+                // A one-byte header and the constant fixlen_word go out together,
+                // then the payload: two stores for the commonest fp64 field.
+                LE_SHORT.set(b, p,
+                        (short) (header | (((8 << 3) | FixlenType.FP64.raw()) << 8)));
+                LE_LONG.set(b, p + 2, bits);
+                offset = p + 10;
+                return;
+            }
+            p = putVarint(b, p, header);
             b[p] = (byte) ((8 << 3) | FixlenType.FP64.raw());
             LE_LONG.set(b, p + 1, bits);
             offset = p + 9;
@@ -809,13 +846,17 @@ public final class OStream {
     // --- array writers ------------------------------------------------------
 
     /**
-     * Minimum element count for a wide-integer array ({@code int[]} / {@code long[]})
-     * to take the check-free bulk encode path. Below this the per-element streaming
-     * loop is used: it is already cheap for a handful of elements, and keeping the
-     * bulk branch (and its {@link #putVarint} reference) out of the method lets the
-     * JIT inline the small array writers and elide short-lived argument arrays.
+     * Widest varint an element of each integer array type can encode to: a
+     * zero-extended byte spans two bytes, a short three, an int five, and a
+     * {@code long} the full ten — and ZigZag never widens past its own type's
+     * bound, since it is a bijection on the same bit width. These are what
+     * {@link #bulkRoom} multiplies by, so each writer's bulk path is judged
+     * against the room its own elements can actually need.
      */
-    private static final int BULK_MIN = 16;
+    private static final int W_BYTE = 2;
+    private static final int W_SHORT = 3;
+    private static final int W_INT = 5;
+    private static final int W_LONG = 10;
 
     /**
      * Spread the low 56 bits of {@code v} into eight byte lanes, seven payload bits
@@ -870,12 +911,11 @@ public final class OStream {
         long hi = v >>> 56;
         // For n == 10 bit 63 of v is bit 7 of hi, which is exactly the continuation
         // flag the ninth byte needs; for n == 9 it is clear, which is what it needs.
-        b[p + 8] = (byte) hi;
-        if (n == 9) {
-            return p + 9;
-        }
-        b[p + 9] = (byte) (hi >>> 7);
-        return p + 10;
+        // Both trailing bytes go out in one two-byte store: the tenth is scratch
+        // when n == 9, and the ten-byte room requirement keeps it inside the buffer
+        // either way — one bounds check and one branch fewer per maximal varint.
+        LE_SHORT.set(b, p + 8, (short) ((hi & 0xFF) | ((hi >>> 7) << 8)));
+        return p + n;
     }
 
     /**
@@ -889,7 +929,24 @@ public final class OStream {
     }
 
     /**
-     * Write an array of unsigned 8-bit integers (each byte zero-extended).
+     * Whether {@code count} elements of at most {@code maxBytes} varint bytes each
+     * are certain to fit in what is left of the buffer, so the element loop can run
+     * with no per-element room test and no flush check.
+     *
+     * <p>The bound is not {@code count * maxBytes}: {@link #putVarint} assembles a
+     * varint with an eight-byte store and so needs {@link #VARINT_ROOM} bytes of
+     * room at <em>every</em> element, the last one included. What must fit is
+     * therefore the first {@code count - 1} elements at their worst case plus a full
+     * varint's room for the last — which for a {@code long} array is exactly
+     * {@code count * 10}, the bound this path has always used.
+     */
+    private boolean bulkRoom(int count, int maxBytes) {
+        return count > 0
+                && (long) end - offset >= (long) (count - 1) * maxBytes + VARINT_ROOM;
+    }
+
+    /**
+     * Write an array of unsigned 8-bit integers (each element zero-extended).
      *
      * @param id   field id
      * @param data elements
@@ -897,26 +954,22 @@ public final class OStream {
      */
     public void writeArrayUnsigned(int id, byte[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.length);
-        byte[] b = buffer;
-        int p = offset;
-        int e = end;
-        for (byte elem : data) {
-            long v = elem & 0xFFL;
-            if (e - p < VARINT_ROOM) {
-                offset = p;
-                writeVarintSlow(v);
-                b = buffer;
-                p = offset;
-                e = end;
-                continue;
+        if (bulkRoom(data.length, W_BYTE)) {
+            byte[] b = buffer;
+            int p = offset;
+            for (byte elem : data) {
+                p = putVarint(b, p, elem & 0xFFL);
             }
-            p = putVarint(b, p, v);
+            offset = p;
+            return;
         }
-        offset = p;
+        for (byte elem : data) {
+            writeVarint(elem & 0xFFL);
+        }
     }
 
     /**
-     * Write an array of unsigned 16-bit integers (each short zero-extended).
+     * Write an array of unsigned 16-bit integers (each element zero-extended).
      *
      * @param id   field id
      * @param data elements
@@ -924,26 +977,22 @@ public final class OStream {
      */
     public void writeArrayUnsigned(int id, short[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.length);
-        byte[] b = buffer;
-        int p = offset;
-        int e = end;
-        for (short elem : data) {
-            long v = elem & 0xFFFFL;
-            if (e - p < VARINT_ROOM) {
-                offset = p;
-                writeVarintSlow(v);
-                b = buffer;
-                p = offset;
-                e = end;
-                continue;
+        if (bulkRoom(data.length, W_SHORT)) {
+            byte[] b = buffer;
+            int p = offset;
+            for (short elem : data) {
+                p = putVarint(b, p, elem & 0xFFFFL);
             }
-            p = putVarint(b, p, v);
+            offset = p;
+            return;
         }
-        offset = p;
+        for (short elem : data) {
+            writeVarint(elem & 0xFFFFL);
+        }
     }
 
     /**
-     * Write an array of unsigned 32-bit integers (each int zero-extended).
+     * Write an array of unsigned 32-bit integers (each element zero-extended).
      *
      * @param id   field id
      * @param data elements
@@ -951,34 +1000,23 @@ public final class OStream {
      */
     public void writeArrayUnsigned(int id, int[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.length);
-        byte[] b = buffer;
-        int p = offset;
-        if (data.length >= BULK_MIN && (long) end - p >= (long) data.length * 10) {
+        if (bulkRoom(data.length, W_INT)) {
+            byte[] b = buffer;
+            int p = offset;
             for (int elem : data) {
                 p = putVarint(b, p, elem & 0xFFFFFFFFL);
             }
             offset = p;
             return;
         }
-        int e = end;
         for (int elem : data) {
-            long v = elem & 0xFFFFFFFFL;
-            if (e - p < VARINT_ROOM) {
-                offset = p;
-                writeVarintSlow(v);
-                b = buffer;
-                p = offset;
-                e = end;
-                continue;
-            }
-            p = putVarint(b, p, v);
+            writeVarint(elem & 0xFFFFFFFFL);
         }
-        offset = p;
     }
 
     /**
-     * Write an array of unsigned 64-bit integers (each {@code long} treated as
-     * an unsigned value).
+     * Write an array of unsigned 64-bit integers (each {@code long} treated as an
+     * unsigned value).
      *
      * @param id   field id
      * @param data elements
@@ -986,32 +1024,18 @@ public final class OStream {
      */
     public void writeArrayUnsigned(int id, long[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.length);
-        byte[] b = buffer;
-        int p = offset;
-        if (data.length >= BULK_MIN && (long) end - p >= (long) data.length * 10) {
-            // The whole array's worst case (10 bytes/element) fits the buffer, so
-            // no element can overflow: run a tight loop with no per-element room
-            // check or flush test.
+        if (bulkRoom(data.length, W_LONG)) {
+            byte[] b = buffer;
+            int p = offset;
             for (long elem : data) {
                 p = putVarint(b, p, elem);
             }
             offset = p;
             return;
         }
-        int e = end;
         for (long elem : data) {
-            long v = elem;
-            if (e - p < VARINT_ROOM) {
-                offset = p;
-                writeVarintSlow(v);
-                b = buffer;
-                p = offset;
-                e = end;
-                continue;
-            }
-            p = putVarint(b, p, v);
+            writeVarint(elem);
         }
-        offset = p;
     }
 
     /**
@@ -1023,22 +1047,18 @@ public final class OStream {
      */
     public void writeArraySigned(int id, byte[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_SIGNED, data.length);
-        byte[] b = buffer;
-        int p = offset;
-        int e = end;
-        for (byte elem : data) {
-            long v = zigzagEncode(elem);
-            if (e - p < VARINT_ROOM) {
-                offset = p;
-                writeVarintSlow(v);
-                b = buffer;
-                p = offset;
-                e = end;
-                continue;
+        if (bulkRoom(data.length, W_BYTE)) {
+            byte[] b = buffer;
+            int p = offset;
+            for (byte elem : data) {
+                p = putVarint(b, p, zigzagEncode(elem));
             }
-            p = putVarint(b, p, v);
+            offset = p;
+            return;
         }
-        offset = p;
+        for (byte elem : data) {
+            writeVarint(zigzagEncode(elem));
+        }
     }
 
     /**
@@ -1050,22 +1070,18 @@ public final class OStream {
      */
     public void writeArraySigned(int id, short[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_SIGNED, data.length);
-        byte[] b = buffer;
-        int p = offset;
-        int e = end;
-        for (short elem : data) {
-            long v = zigzagEncode(elem);
-            if (e - p < VARINT_ROOM) {
-                offset = p;
-                writeVarintSlow(v);
-                b = buffer;
-                p = offset;
-                e = end;
-                continue;
+        if (bulkRoom(data.length, W_SHORT)) {
+            byte[] b = buffer;
+            int p = offset;
+            for (short elem : data) {
+                p = putVarint(b, p, zigzagEncode(elem));
             }
-            p = putVarint(b, p, v);
+            offset = p;
+            return;
         }
-        offset = p;
+        for (short elem : data) {
+            writeVarint(zigzagEncode(elem));
+        }
     }
 
     /**
@@ -1077,29 +1093,18 @@ public final class OStream {
      */
     public void writeArraySigned(int id, int[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_SIGNED, data.length);
-        byte[] b = buffer;
-        int p = offset;
-        if (data.length >= BULK_MIN && (long) end - p >= (long) data.length * 10) {
+        if (bulkRoom(data.length, W_INT)) {
+            byte[] b = buffer;
+            int p = offset;
             for (int elem : data) {
                 p = putVarint(b, p, zigzagEncode(elem));
             }
             offset = p;
             return;
         }
-        int e = end;
         for (int elem : data) {
-            long v = zigzagEncode(elem);
-            if (e - p < VARINT_ROOM) {
-                offset = p;
-                writeVarintSlow(v);
-                b = buffer;
-                p = offset;
-                e = end;
-                continue;
-            }
-            p = putVarint(b, p, v);
+            writeVarint(zigzagEncode(elem));
         }
-        offset = p;
     }
 
     /**
@@ -1111,29 +1116,18 @@ public final class OStream {
      */
     public void writeArraySigned(int id, long[] data) throws IOException {
         writeArrayHeader(id, T_VARINTARRAY_SIGNED, data.length);
-        byte[] b = buffer;
-        int p = offset;
-        if (data.length >= BULK_MIN && (long) end - p >= (long) data.length * 10) {
+        if (bulkRoom(data.length, W_LONG)) {
+            byte[] b = buffer;
+            int p = offset;
             for (long elem : data) {
                 p = putVarint(b, p, zigzagEncode(elem));
             }
             offset = p;
             return;
         }
-        int e = end;
         for (long elem : data) {
-            long v = zigzagEncode(elem);
-            if (e - p < VARINT_ROOM) {
-                offset = p;
-                writeVarintSlow(v);
-                b = buffer;
-                p = offset;
-                e = end;
-                continue;
-            }
-            p = putVarint(b, p, v);
+            writeVarint(zigzagEncode(elem));
         }
-        offset = p;
     }
 
     /**
@@ -1144,7 +1138,7 @@ public final class OStream {
      * @throws IOException on buffer overflow or sink failure
      */
     public void writeArrayFp32(int id, float[] data) throws IOException {
-        writeIdTypeValue(id, T_FIXLENARRAY, data.length);
+        writeArrayHeader(id, T_FIXLENARRAY, data.length);
         // §4.8: a fixlen array always carries its fixlen_word (the shared element
         // subtype/width), even when empty, so an empty fp32 array is
         // distinguishable on the wire from an empty fp64 array. The payload loop
@@ -1175,7 +1169,7 @@ public final class OStream {
      * @throws IOException on buffer overflow or sink failure
      */
     public void writeArrayFp64(int id, double[] data) throws IOException {
-        writeIdTypeValue(id, T_FIXLENARRAY, data.length);
+        writeArrayHeader(id, T_FIXLENARRAY, data.length);
         // §4.8: a fixlen array always carries its fixlen_word (the shared element
         // subtype/width), even when empty, so an empty fp64 array is
         // distinguishable on the wire from an empty fp32 array. The payload loop

@@ -292,9 +292,12 @@ throughout, with state in caller-provided arrays plus a small fixed object.
   (`offset == buf.length`) fails *in that `bufferSet` call*, not at some later write.
   A buffer installed **without** a sink is subject to no minimum: no flush can occur,
   so it either holds the message or raises `BUFFER_FULL`, and sizing from the
-  generated `MAX_SIZE` stays exact. A multi-byte varint is
-  assembled in a register and stored eight bytes at a time, so the encoder may leave
-  up to **seven scratch bytes** in the buffer just past the write position; they are
+  generated `MAX_SIZE` stays exact. A field is written with as few stores as its
+  shape allows — a multi-byte varint is assembled in a register and stored eight
+  bytes at a time, a one-byte header and one-byte value go out as a single two-byte
+  store, and a whole `fp32` field (header, `fixlen_word` and payload) as a single
+  eight-byte one — so a store may reach past the field it wrote and the encoder may
+  leave up to **seven scratch bytes** in the buffer just past the write position; they are
   never part of the message, sit strictly between `bytesUsed()` and the end of the
   buffer, are overwritten by the next write, and are never flushed — read back only
   `[0, bytesUsed())`. Bytes before the starting `offset` reserved for a lower-layer

@@ -90,10 +90,13 @@ class DecodeRuleWrittenOnceTest {
     }
 
     /**
-     * One bounded varint reader, not one per caller. The reader used where fewer
-     * than ten bytes remain has the shape {@code long f(byte[], int, int)}, and so
-     * does the off-hot-path word reader; a third method of that shape is a
-     * duplicate of one of them, which is what this pins.
+     * <em>One</em> bounded varint reader, not one per caller and not one per role.
+     * Every site that reads a varint from a buffer which may end inside it — field
+     * header, scalar value, array element, {@code fixlen_word}, array count — wants
+     * the same thing: consume bytes up to {@code end}, hand the position back out of
+     * band, and reject a varint past the 64-bit bound. A reader has the shape
+     * {@code long f(byte[], int, int)}, so a second method of that shape is a second
+     * copy of that job, which is what this pins.
      */
     @Test
     void oneBoundedVarintReaderServesEveryCaller() {
@@ -108,10 +111,9 @@ class DecodeRuleWrittenOnceTest {
             }
         }
         readers.sort(String::compareTo);
-        assertEquals(List.of("boundedVarint", "readWord"), readers,
-                "expected exactly two varint readers — the bounded tail reader shared by the "
-                        + "header, scalar-value and array-element sites, and the off-hot-path "
-                        + "word reader");
+        assertEquals(List.of("readWord"), readers,
+                "expected exactly one bounded varint reader, shared by the header, "
+                        + "scalar-value, array-element, fixlen_word and array-count sites");
     }
 
     // --- behavioural: one verdict per word, on every reading surface ----------
