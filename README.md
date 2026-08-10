@@ -282,8 +282,8 @@ throughout, with state in caller-provided arrays plus a small fixed object.
   retains bytes must copy the range itself. `FixlenType` travels **outwards only**:
   the writers take one of its constants and `raw()` turns it into the wire tag, while
   the decoder narrows an incoming tag itself — rejecting the reserved values
-  `0x4..0x7` at each site that reads a `fixlen_word` — and hands the visitor the
-  matching constant. There is deliberately no tag-to-constant entry point on the
+  `0x4..0x7` in the single check that every site reading a `fixlen_word` runs — and
+  hands the visitor the matching constant. There is deliberately no tag-to-constant entry point on the
   enum — the `fromRaw` lookup that used to sit there was removed after 0.10.0 as
   public API with no caller and no reachable failure mode.
 
