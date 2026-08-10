@@ -10,12 +10,16 @@ ARG JAVA_VERSION=21
 ENV JAVA_HOME=/usr/lib/jvm/temurin-${JAVA_VERSION}-jdk-amd64
 ENV PATH=$JAVA_HOME/bin:$PATH
 
+# valgrind drives bench/run_callgrind.sh — the one benchmark tool of the three
+# that reports a machine-independent number (Ir/op). Without it the shipped
+# environment cannot run a tool the repository ships.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
     build-essential \
     gnupg \
+    valgrind \
     && rm -rf /var/lib/apt/lists/*
 
 # Temurin JDK (Adoptium) + Maven + Gradle
