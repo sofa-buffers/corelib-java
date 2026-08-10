@@ -300,7 +300,13 @@ mvn -B test            # tests only
 
 `verify` runs every suite — including the shared conformance vectors — and writes a
 JaCoCo report to `target/site/jacoco/` (coverage is gated in CI). The suites live in
-`src/test/java/org/sofabuffers/sofab/`.
+`src/test/java/org/sofabuffers/sofab/`, and the helpers they share live once in
+`.../sofab/common/`: `Wire.bytes` / `Wire.concat` build a wire vector, `Decode.errorOf`
+and `Decode.errorOfChunked` feed one whole buffer and one byte at a time, and
+`Decode.verdict` reduces a decode to accept / incomplete / rejected. Malformed input is
+one table — `DecoderErrorsTest.malformedVectors()`, one row per vector, every row driven
+through both decode surfaces — so a new rejection case is a row there rather than a new
+suite.
 
 ## Benchmarks
 

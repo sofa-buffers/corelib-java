@@ -9,6 +9,7 @@ package org.sofabuffers.sofab;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.sofabuffers.sofab.common.Wire.bytes;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -105,14 +106,6 @@ class EncoderOverloadsTest {
         SofabException ex = assertThrows(SofabException.class,
                 () -> new OStream(new byte[16]).writeFixlen(0, new byte[4], 0, -1, FixlenType.BLOB));
         assertEquals(SofabError.ARGUMENT, ex.error());
-    }
-
-    private static byte[] bytes(int... values) {
-        byte[] out = new byte[values.length];
-        for (int i = 0; i < values.length; i++) {
-            out[i] = (byte) values[i];
-        }
-        return out;
     }
 
     /**

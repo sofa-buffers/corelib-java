@@ -20,6 +20,7 @@ package org.sofabuffers.sofab;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.sofabuffers.sofab.common.Wire.bytes;
 
 import java.io.UncheckedIOException;
 import java.util.List;
@@ -29,14 +30,6 @@ import org.junit.jupiter.api.Test;
 import org.sofabuffers.sofab.common.RecordingVisitor;
 
 class InvalidIsTerminalTest {
-
-    private static byte[] bytes(int... values) {
-        byte[] out = new byte[values.length];
-        for (int i = 0; i < values.length; i++) {
-            out[i] = (byte) values[i];
-        }
-        return out;
-    }
 
     /** Feed {@code data} and assert it is rejected as INVALID_MSG. */
     private static void assertRejects(IStream is, Visitor v, byte[] data) {

@@ -33,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.sofabuffers.sofab.common.Wire.bytes;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -245,13 +246,5 @@ class ResetCoversEveryFieldTest {
             }
         }
         return differing;
-    }
-
-    private static byte[] bytes(int... values) {
-        byte[] out = new byte[values.length];
-        for (int i = 0; i < values.length; i++) {
-            out[i] = (byte) values[i];
-        }
-        return out;
     }
 }

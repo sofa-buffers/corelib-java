@@ -15,7 +15,7 @@
 package org.sofabuffers.sofab;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.sofabuffers.sofab.common.Wire.bytes;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -79,57 +79,7 @@ class StateMachineCoverageTest {
         assertEquals(whole.events, feedInChunks(msg, 13));
     }
 
-    // --- malformed input reaching the state machine (multi-byte, fed in pieces) --
-
-    private static byte[] bytes(int... values) {
-        byte[] out = new byte[values.length];
-        for (int i = 0; i < values.length; i++) {
-            out[i] = (byte) values[i];
-        }
-        return out;
-    }
-
-    private static SofabError slowError(byte[] data) {
-        SofabException ex = assertThrows(SofabException.class, () -> {
-            IStream is = new IStream();
-            for (byte b : data) {
-                is.feed(new byte[] {b}, new Visitor() { });
-            }
-        });
-        return ex.error();
-    }
-
-    @Test
-    void idOverflowViaStateMachine() {
-        // Five-byte header whose id exceeds ID_MAX; reassembled byte-by-byte.
-        assertEquals(SofabError.INVALID_MSG, slowError(bytes(0x80, 0x80, 0x80, 0x80, 0x40)));
-    }
-
-    @Test
-    void varintOverflowViaStateMachine() {
-        assertEquals(SofabError.INVALID_MSG,
-                slowError(bytes(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80)));
-    }
-
-    @Test
-    void fixlenLengthAboveMaxViaStateMachine() {
-        assertEquals(SofabError.INVALID_MSG, slowError(bytes(0x02, 0x82, 0x80, 0x80, 0x80, 0x40)));
-    }
-
-    @Test
-    void fp64WrongLengthViaStateMachine() {
-        assertEquals(SofabError.INVALID_MSG, slowError(bytes(0x02, 0x21)));
-    }
-
-    @Test
-    void reservedFixlenTypeViaStateMachine() {
-        assertEquals(SofabError.INVALID_MSG, slowError(bytes(0x02, 0x04)));
-    }
-
-    @Test
-    void stringAsFixlenArrayElementViaStateMachine() {
-        assertEquals(SofabError.INVALID_MSG, slowError(bytes(0x05, 0x01, 0x0A)));
-    }
+    // --- a control the malformed table pairs with (§4.7) ---------------------
 
     @Test
     void zeroLengthArrayViaStateMachine() throws SofabException {

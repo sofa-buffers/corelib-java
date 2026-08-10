@@ -23,7 +23,10 @@ package org.sofabuffers.sofab;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.sofabuffers.sofab.common.Decode.errorOf;
+import static org.sofabuffers.sofab.common.Decode.errorOfChunked;
+import static org.sofabuffers.sofab.common.Wire.bytes;
+import static org.sofabuffers.sofab.common.Wire.concat;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -37,14 +40,6 @@ class SequenceEndIdTest {
     /** One past ID_MAX: rejected on an end marker exactly as anywhere else. */
     private static final long OVER_ID_MAX = 1L << 31;
 
-    private static byte[] bytes(int... values) {
-        byte[] out = new byte[values.length];
-        for (int i = 0; i < values.length; i++) {
-            out[i] = (byte) values[i];
-        }
-        return out;
-    }
-
     /** The header varint {@code (id << 3) | wireType}, minimally encoded. */
     private static byte[] header(long id, int wireType) {
         long v = (id << 3) | wireType;
@@ -56,20 +51,6 @@ class SequenceEndIdTest {
         }
         out[n++] = (byte) v;
         return Arrays.copyOf(out, n);
-    }
-
-    private static byte[] concat(byte[]... parts) {
-        int total = 0;
-        for (byte[] p : parts) {
-            total += p.length;
-        }
-        byte[] out = new byte[total];
-        int n = 0;
-        for (byte[] p : parts) {
-            System.arraycopy(p, 0, out, n, p.length);
-            n += p.length;
-        }
-        return out;
     }
 
     private static List<String> decode(byte[] data) throws SofabException {
@@ -89,22 +70,6 @@ class SequenceEndIdTest {
         }
         assertEquals(DecodeStatus.COMPLETE, is.status());
         return v.events;
-    }
-
-    private static SofabError errorOf(byte[] data) {
-        SofabException ex = assertThrows(SofabException.class, () -> new IStream().feed(data, new Visitor() { }));
-        return ex.error();
-    }
-
-    private static SofabError errorOfChunked(byte[] data) {
-        SofabException ex = assertThrows(SofabException.class, () -> {
-            IStream is = new IStream();
-            Visitor v = new Visitor() { };
-            for (byte b : data) {
-                is.feed(new byte[] {b}, v);
-            }
-        });
-        return ex.error();
     }
 
     // --- the ceiling binds a sequence-end header too (§6.2) -------------------

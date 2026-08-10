@@ -14,6 +14,7 @@ package org.sofabuffers.sofab;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.sofabuffers.sofab.common.Wire.bytes;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -44,14 +45,6 @@ class EncoderPathCoverageTest {
         body.run(os);
         os.flush();
         return out.toByteArray();
-    }
-
-    private static byte[] bytes(int... values) {
-        byte[] out = new byte[values.length];
-        for (int i = 0; i < values.length; i++) {
-            out[i] = (byte) values[i];
-        }
-        return out;
     }
 
     // --- constructor / bufferSet argument validation -------------------------
