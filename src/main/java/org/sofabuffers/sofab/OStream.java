@@ -310,7 +310,7 @@ public final class OStream {
      * one-shot encode, or the other way round.
      *
      * <p>Unlike {@link #bufferSet} this also clears the sequence nesting depth and
-     * the held-back sequence run. That is the whole point for reuse: a marshal that
+     * the held-back sequence run. That is the whole point for reuse: an encode that
      * threw part-way leaves the depth counter non-zero and can leave sequence
      * headers pending, and carrying either into the next message on the same thread
      * would corrupt its nesting validation or prepend a stale {@code sequence start}

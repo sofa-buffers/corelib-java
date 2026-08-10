@@ -12,7 +12,7 @@ import java.io.IOException;
  *
  * <p>It extends {@link IOException} so it composes naturally with Java I/O: a
  * {@link FlushSink} that writes to a socket or file may itself throw
- * {@code IOException}, and generated marshal/unmarshal code can simply declare
+ * {@code IOException}, and generated {@code serialize} code can simply declare
  * {@code throws IOException}. The specific {@link SofabError} is available via
  * {@link #error()}.
  */

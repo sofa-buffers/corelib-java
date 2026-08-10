@@ -11,8 +11,9 @@
  *
  * <p>This package is the <b>runtime stream core</b> (equivalent to the C
  * {@code corelib}'s {@code istream} / {@code ostream}), meant to be driven by
- * generated code: a schema-driven generator emits one class per message plus
- * marshal / unmarshal methods that call the primitives here, the same way
+ * generated code: a schema-driven generator emits one class per message plus the
+ * {@code serialize} / {@code deserialize} pair that calls the primitives here,
+ * the same way
  * protobuf-java's generated code calls {@code CodedOutputStream} /
  * {@code CodedInputStream}.
  *
