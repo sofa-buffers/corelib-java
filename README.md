@@ -105,6 +105,25 @@ for (int i = 0; i < 1000; i++)
 os.flush();                                         // push the tail
 ```
 
+A sink that *takes* the buffer instead of copying out of it — a zero-copy
+transport — must hand the encoder a replacement before it returns, and the cursor
+then starts at that installation's offset. That is also how a sink reserves
+framing-header room in **every** flushed unit, since the offset belongs to the
+installation and is consumed by the flush it was made in:
+
+```java
+byte[][] window = { fresh(16) };                    // fresh() reserves 3 header bytes
+OStream[] self = new OStream[1];
+OStream os = new OStream(window[0], 3, (data, off, len) -> {
+    transport.send(data, off, len);                 // takes the array
+    self[0].bufferSet(fresh(16), 3);                // re-arms 3 bytes in the next unit
+});
+self[0] = os;
+```
+
+Returning **without** `bufferSet` means the sink copied: the same buffer stays
+active and writing resumes at offset 0.
+
 ### Deserialize
 
 Decoding is push-based: implement a `Visitor` and override only the field kinds you
@@ -202,7 +221,17 @@ throughout, with state in caller-provided arrays plus a small fixed object.
   fills, a `FlushSink` (if set) receives the bytes and writing resumes at the start
   of the *same* buffer — so a message can exceed the buffer or RAM; with no sink, a
   full buffer raises `BUFFER_FULL`. The sink's array is reused after the call
-  returns, so a sink that keeps the bytes must copy them. A multi-byte varint is
+  returns, so a sink that keeps the bytes must copy them — **or take the buffer**
+  and install a replacement with `bufferSet(buf, offset)` before returning
+  (CORELIB_PLAN §5.1). Which of the two happened is stated by that call and by
+  nothing else: return without it and the encoder resumes at offset 0 in the
+  still-active buffer; install one and it resumes at *that* call's offset. **The
+  start offset belongs to the installation, not to the buffer** — it is consumed by
+  the flush it was made in, so a sink that wants framing-header room in *every* unit
+  re-arms it on each flush (passing the same array again is a new installation like
+  any other), while a `bufferSet` made outside a sink reserves room in the current
+  unit only. A replacement with no room left (`offset == buf.length`) raises
+  `BUFFER_FULL` at the write in flight. A multi-byte varint is
   assembled in a register and stored eight bytes at a time, so the encoder may leave
   up to **seven scratch bytes** in the buffer just past the write position; they are
   never part of the message, sit strictly between `bytesUsed()` and the end of the
