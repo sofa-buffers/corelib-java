@@ -73,6 +73,22 @@ class Utf8Test {
     }
 
     @Test
+    void rejectsABadContinuationAfterTheSecondByte() {
+        // The second byte carries the lead-specific range that rules out the
+        // overlongs and the surrogates; every byte after it must be a plain
+        // continuation 80..BF. A validator that checked only the second one would
+        // accept all of these — and each of them is a *different* three-byte or
+        // four-byte code point than the bytes claim to be.
+        assertFalse(valid(0xE0, 0xA0, 0x41));       // third byte is ASCII
+        assertFalse(valid(0xE0, 0xA0, 0xC2));       // third byte is a lead byte
+        assertFalse(valid(0xEF, 0xBF, 0x7F));
+        assertFalse(valid(0xF0, 0x90, 0x41, 0x80)); // third byte of a 4-byte form
+        assertFalse(valid(0xF0, 0x90, 0xF0, 0x80));
+        assertFalse(valid(0xF0, 0x90, 0x80, 0x41)); // fourth byte below 80
+        assertFalse(valid(0xF0, 0x90, 0x80, 0xC2)); // fourth byte above BF
+    }
+
+    @Test
     void validatesOnlyTheGivenRange() {
         // The bytes outside [i, end) must not influence the verdict — the decode
         // path validates one field's slice of a larger buffer.
