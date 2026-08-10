@@ -170,6 +170,16 @@ while ((n = in.read(chunk)) != -1) {
 }
 ```
 
+**Chunking costs only what straddles.** Whenever a whole field is in hand the decoder
+advances a pointer straight over the buffer; only a field, array element or
+`fixlen_word` that would run past the end of the supplied bytes goes through the
+resumable byte-at-a-time machine, and the moment that one construct completes the
+rest of the chunk goes back to the bulk path — inside an array too, not just between
+fields. A boundary anywhere in a 100 000-element array therefore costs one element,
+not the 99 999 after it, so chunked decoding runs at one-shot speed wherever the
+chunks happen to fall (`fp64` array in 4 KiB chunks: 31.6 → 0.9 ns/element). Feed
+whatever sizes your transport produces.
+
 ### Code generator
 
 The common real use is driving the runtime through **generated code**: `sofabgen`
