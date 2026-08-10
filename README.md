@@ -12,7 +12,7 @@
 [![CI](https://github.com/sofa-buffers/corelib-java/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sofa-buffers/corelib-java/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsofa-buffers%2Fcorelib-java%2Fbadges%2Fcoverage.json)](https://github.com/sofa-buffers/corelib-java/actions/workflows/ci.yml)
 [![Branches](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsofa-buffers%2Fcorelib-java%2Fbadges%2Fbranches.json)](https://github.com/sofa-buffers/corelib-java/actions/workflows/ci.yml)
-[![Javadoc](https://img.shields.io/badge/javadoc-online-blue)](https://sofa-buffers.github.io/corelib-java/)
+[![Docs](https://img.shields.io/badge/docs-javadoc-blue)](https://sofa-buffers.github.io/corelib-java/)
 
 [GitHub repository](https://github.com/sofa-buffers/corelib-java)
 
@@ -42,7 +42,7 @@ is the package `org.sofabuffers.sofab`.
 
 ### Requirements
 
-- **JDK 17+** (the build targets release 17; CI also runs on LTS 21).
+- **JDK 17+** (the build targets release 17; CI builds on JDK 17, 21 and 25).
 
 ### Dependencies
 
@@ -313,9 +313,13 @@ throughout, with state in caller-provided arrays plus a small fixed object.
   byte is written — this API cannot emit a string the family's own decoders would
   reject. `FixlenType.BLOB` is the type for opaque bytes and is never validated,
   so the other fixlen writers (`writeBlob`, `writeFp32/64`) pay only one enum
-  comparison. On the decode side the strict-UTF-8 check lives in generated code,
-  which materializes the `String` with a REPORTing `CharsetDecoder` that raises
-  `INVALID_MSG`.
+  comparison. On the decode side the check lives in generated code too, and it is
+  the **same validator**: once the declared payload is complete, generated code
+  runs `Utf8.valid` over the assembled bytes and raises `INVALID_MSG` if they are
+  malformed — a multi-byte sequence merely split across two chunks is still
+  arriving, not invalid. The corelib itself never validates a payload it only
+  streams, which is what makes a *skipped* string a pure length jump with no
+  per-byte work (§6.4).
 - **Decode (`IStream` + `Visitor`).** `feed` runs a cursor over the caller's input
   `byte[]`, **aliasing** it. Scalars and floats are passed **by value** (`long` /
   `double`); strings and blobs are handed to the visitor as a **window** (`data`,
@@ -341,7 +345,8 @@ mvn -B test            # tests only
 ```
 
 `verify` runs every suite — including the shared conformance vectors — and writes a
-JaCoCo report to `target/site/jacoco/` (coverage is gated in CI). The suites live in
+JaCoCo report to `target/site/jacoco/`; CI publishes that report as the coverage
+and branches badges above. The suites live in
 `src/test/java/org/sofabuffers/sofab/`, and the helpers they share live once in
 `.../sofab/common/`: `Wire.bytes` / `Wire.concat` build a wire vector, `Decode.errorOf`
 and `Decode.errorOfChunked` feed one whole buffer and one byte at a time, and
@@ -352,17 +357,24 @@ suite.
 
 ## Benchmarks
 
-Two runnable tools mirror the other ports' `perf` and `bench` tooling — same
-workloads (a 1000-element `u64` array and a mixed message) and output format, so
-results are comparable across languages:
+Three runnable tools mirror the other ports' `perf`, `bench` and
+`run_callgrind.sh` tooling — same workloads (a 1000-element `u64` array and a
+mixed message) and output format, so results are comparable across languages:
 
 ```bash
 mvn -q compile exec:java -Dexec.mainClass=org.sofabuffers.sofab.bench.Perf   # per-op cost
 mvn -q compile exec:java -Dexec.mainClass=org.sofabuffers.sofab.bench.Bench  # throughput (MB/s)
+bash bench/run_callgrind.sh                                                  # instructions/op
 ```
 
 `Perf` reports thread-CPU-time ns/op (the JVM exposes no portable cycle counter; run
 under an external counter such as `perf stat -e instructions:u …` for a
 CPU-speed-independent number). `Bench` reports encode / decode throughput in MB/s
-over a ~1 s CPU-time loop. The exact workloads and output grammar are specified in
+over a ~1 s CPU-time loop. `bench/run_callgrind.sh` (needs `valgrind`) reports
+**instructions retired per op** (Ir/op) under Callgrind — deterministic and
+independent of clock speed and scheduler, so the numbers compare across machines and
+against the sibling ports. There is no JIT-compiled `run_<workload>` symbol to toggle
+collection on, so — like the Python and TypeScript ports — it runs each workload at
+two rep counts and subtracts, which cancels JVM startup, class loading and JIT cost
+exactly. The exact workloads and output grammar are specified in
 the [SofaBuffers documentation](https://github.com/sofa-buffers/documentation).
