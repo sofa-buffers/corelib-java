@@ -2,10 +2,25 @@
  * SofaBuffers Java - throughput benchmark (MB/s, CPU time).
  *
  * Mirror of bench/c/bench.c, bench/cpp/bench.cpp and benches/bench.rs: encode /
- * decode throughput for two workloads -- a 1000-element u64 array and a small
- * "typical" mixed message. Each workload runs in a ~1 s CPU-time loop and
- * reports MB/s in the same table layout as the C/C++/Rust tools, so the
- * implementations can be compared directly. MB = 1e6 bytes.
+ * decode throughput for BENCH_SPEC's workload set -- a 1000-element u64 array, a
+ * small "typical" mixed message, an unbounded 1 MB blob and the "composite"
+ * message that reaches the paths the flat datasets miss. Each workload runs in a
+ * ~1 s CPU-time loop and reports MB/s in the same table layout as the C/C++/Rust
+ * tools, so the implementations can be compared directly. MB = 1e6 bytes.
+ *
+ * **Read the blob 1MB rows against each other, not against the others.** Five
+ * bytes of that message are metadata and a million are payload, so its MB/s is
+ * this machine's memory bandwidth rather than a statement about the corelib --
+ * and the streamed row can even come out ahead of the one-shot one here, since a
+ * 4 KiB window stays in L1 while a one-shot encode writes a megabyte out to
+ * memory. The flush machinery's own cost (CORELIB_PLAN §5.1) does not survive
+ * that: bench/run_callgrind.sh is what measures it, with the caveat the README
+ * states about this JVM's array-copy stub.
+ *
+ * The two `composite` decode rows carry a JVM-specific caveat of their own: they
+ * share one process, so the visitor call sites inside IStream see both sinks and
+ * neither row runs monomorphic. `skip-all` is the cheaper of the two in Ir/op,
+ * where each workload gets a JVM to itself, and that is where to read it.
  *
  * Run with:
  *   mvn -q compile exec:java -Dexec.mainClass=org.sofabuffers.sofab.bench.Bench
@@ -15,179 +30,39 @@
 package org.sofabuffers.sofab.bench;
 
 import java.io.IOException;
-import java.lang.management.ManagementFactory;
-import java.lang.management.ThreadMXBean;
-import java.util.Arrays;
-
-import org.sofabuffers.sofab.ArrayKind;
-import org.sofabuffers.sofab.IStream;
-import org.sofabuffers.sofab.OStream;
-import org.sofabuffers.sofab.Visitor;
+import java.util.List;
+import java.util.Locale;
 
 public final class Bench {
 
     private Bench() {
     }
 
-    private static final ThreadMXBean THREADS = ManagementFactory.getThreadMXBean();
-    private static final int N = 1000;
-    private static final double MIN_SECONDS = 1.0;
-
-    static long BLACKHOLE;
-
-    private static double cpuNow() {
-        return THREADS.getCurrentThreadCpuTime() / 1e9;
-    }
-
-    /** Decode sink that folds every value into a checksum (defeats elision). */
-    private static final class Checksum implements Visitor {
-        long acc;
-        @Override public void unsigned(int id, long v) { acc += v ^ id; }
-        @Override public void signed(int id, long v) { acc += v ^ id; }
-        @Override public void fp32(int id, float v) { acc += Float.floatToRawIntBits(v); }
-        @Override public void fp64(int id, double v) { acc += Double.doubleToRawLongBits(v); }
-        @Override public void string(int id, int total, int offset, byte[] d, int o, int l) { acc += l; }
-        @Override public void blob(int id, int total, int offset, byte[] d, int o, int l) { acc += l; }
-        @Override public void arrayBegin(int id, ArrayKind kind, int count) { /* no-op */ }
-    }
-
-    private static long[] makeSrc() {
-        long[] a = new long[N];
-        for (int i = 0; i < N; i++) {
-            a[i] = i * 0x9E37_79B9_7F4A_7C15L;
-        }
-        return a;
-    }
-
-    private static void encodeTypical(OStream os) throws IOException {
-        os.writeUnsigned(1, 0xDEAD_BEEFL);
-        os.writeSigned(2, -12345);
-        os.writeBoolean(3, true);
-        os.writeFp32(4, 3.14159f);
-        os.writeString(5, "sofab");
-        os.writeArrayUnsigned(6, new short[] {10, 20, 30, 40});
-        os.writeSequenceBeginLazy(7);
-        os.writeUnsigned(1, 99);
-        os.writeSigned(2, -7);
-        os.writeSequenceEnd();
-    }
-
-    @FunctionalInterface
-    private interface Body {
-        void run() throws IOException;
-    }
-
-    /**
-     * How long one batch of operations runs before the clock is read again.
-     * {@code getCurrentThreadCpuTime()} costs on the order of a microsecond,
-     * so reading it once per operation times the clock rather than the codec
-     * on the cheap workloads. Ten milliseconds of work per read keeps the
-     * measurement under ~0.01% of a batch.
-     */
-    private static final double BATCH_SECONDS = 0.01;
-
-    /** Grow a batch until it spans {@link #BATCH_SECONDS}. */
-    private static long calibrateBatch(Body body) throws IOException {
-        for (long batch = 1; ; batch *= 2) {
-            double t0 = cpuNow();
-            for (long k = 0; k < batch; k++) {
-                body.run();
-            }
-            if (cpuNow() - t0 >= BATCH_SECONDS) {
-                return batch;
-            }
-        }
-    }
-
-    /** Run {@code body} for ~1 s of CPU time (after warmup) -> MB/s. */
-    private static double measure(int bytes, Body body) throws IOException {
-        for (int i = 0; i < 200_000; i++) {
-            body.run(); // warmup / JIT
-        }
-        long batch = calibrateBatch(body);
-        long it = 0;
-        double t0 = cpuNow();
-        double el;
-        do {
-            for (long k = 0; k < batch; k++) {
-                body.run();
-            }
-            it += batch;
-            el = cpuNow() - t0;
-        } while (el < MIN_SECONDS);
-        return (double) bytes * it / el / 1e6;
-    }
-
     public static void main(String[] args) throws IOException {
-        if (!THREADS.isCurrentThreadCpuTimeSupported()) {
+        if (!Loop.supported()) {
             System.err.println("bench: thread CPU time not supported on this JVM");
             return;
         }
-        THREADS.setThreadCpuTimeEnabled(true);
 
-        long[] src = makeSrc();
-
-        // Pre-encode to learn byte sizes and to use as decode input.
-        byte[] u64Buf = new byte[N * 11 + 16];
-        int u64Used;
-        {
-            OStream os = new OStream(u64Buf);
-            os.writeArrayUnsigned(1, src);
-            u64Used = os.bytesUsed();
+        List<Workloads.Workload> workloads = Workloads.all();
+        double[] mbs = new double[workloads.size()];
+        for (int i = 0; i < workloads.size(); i++) {
+            Workloads.Workload w = workloads.get(i);
+            mbs[i] = Loop.run(w.body()).megabytesPerSecond(w.bytes());
         }
-        byte[] u64Wire = Arrays.copyOf(u64Buf, u64Used);
-
-        byte[] typBuf = new byte[256];
-        int typUsed;
-        {
-            OStream os = new OStream(typBuf);
-            encodeTypical(os);
-            typUsed = os.bytesUsed();
-        }
-        byte[] typWire = Arrays.copyOf(typBuf, typUsed);
-
-        final int ba = u64Used;
-        final int bt = typUsed;
-
-        // Reused encode targets (allocation outside the timed loop).
-        byte[] encU64Out = new byte[N * 11 + 16];
-        byte[] encTypOut = new byte[256];
-
-        long[] sink = {0};
-
-        double encU64 = measure(ba, () -> {
-            OStream os = new OStream(encU64Out);
-            os.writeArrayUnsigned(1, src);
-            sink[0] += os.bytesUsed();
-        });
-        double encTyp = measure(bt, () -> {
-            OStream os = new OStream(encTypOut);
-            encodeTypical(os);
-            sink[0] += os.bytesUsed();
-        });
-        double decU64 = measure(ba, () -> {
-            Checksum c = new Checksum();
-            new IStream().feed(u64Wire, c);
-            sink[0] += c.acc;
-        });
-        double decTyp = measure(bt, () -> {
-            Checksum c = new Checksum();
-            new IStream().feed(typWire, c);
-            sink[0] += c.acc;
-        });
-        BLACKHOLE = sink[0];
 
         System.out.println("=== SofaBuffers Java throughput (CPU time, MB/s) ===");
-        System.out.printf("%-26s %12s%n", "Workload", "MB/s");
-        System.out.printf("%-26s %12s%n", "--------", "----");
-        System.out.printf("%-26s %12.2f%n", "encode: u64 array (1000)", encU64);
-        System.out.printf("%-26s %12.2f%n", "encode: typical message", encTyp);
-        System.out.printf("%-26s %12.2f%n", "decode: u64 array (1000)", decU64);
-        System.out.printf("%-26s %12.2f%n", "decode: typical message", decTyp);
+        System.out.printf(Locale.ROOT, "%-26s %12s%n", "Workload", "MB/s");
+        System.out.printf(Locale.ROOT, "%-26s %12s%n", "--------", "----");
+        for (int i = 0; i < workloads.size(); i++) {
+            System.out.printf(Locale.ROOT, "%-26s %12.2f%n", workloads.get(i).label(), mbs[i]);
+        }
         System.out.println();
         System.out.println("MB = 1e6 bytes. ~1s CPU-time loop per workload.");
-        if (BLACKHOLE == 42) {
-            System.out.print("");
+        System.out.println(
+                "blob 1MB is bandwidth-bound: read one-shot vs streaming, not either alone.");
+        if (Loop.blackhole == 42) {
+            System.out.print(""); // keep the blackhole observably live
         }
     }
 }
