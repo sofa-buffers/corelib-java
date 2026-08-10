@@ -1,14 +1,17 @@
 package org.sofabuffers.sofab;
 
 /**
- * UTF-8 validation of a raw byte range, for the decode side of a {@code string}
- * field (CORELIB_PLAN §6.4).
+ * UTF-8 validation of a raw byte range, for both sides of a {@code string} field
+ * (CORELIB_PLAN §6.4).
  *
- * <p>The encoder already rejects an invalid {@code String} while measuring it
- * ({@link OStream}); this is the other direction — bytes arriving from a peer,
- * which must be validated <em>before</em> they are handed to the consumer as a
- * {@code String}. Generated code needs it on every materialized string, so it
- * belongs here rather than being emitted into every generated message class.
+ * <p>{@link OStream#writeString} rejects an invalid {@code String} while
+ * measuring it, but wherever a {@code string} is handled as <em>raw bytes</em>
+ * this validator is what enforces the contract: on encode for the byte-container
+ * entry point {@link OStream#writeFixlen} with {@link FixlenType#STRING}, and on
+ * decode for bytes arriving from a peer, which must be validated <em>before</em>
+ * they are handed to the consumer as a {@code String}. Generated code needs it on
+ * every materialized string, so it belongs here rather than being emitted into
+ * every generated message class.
  *
  * <p>Validation is on the byte range, not on a constructed {@code String}:
  * {@code new String(bytes, UTF_8)} silently substitutes U+FFFD for malformed

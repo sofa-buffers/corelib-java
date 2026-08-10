@@ -107,6 +107,65 @@ class EncoderOverloadsTest {
         assertEquals(SofabError.ARGUMENT, ex.error());
     }
 
+    private static byte[] bytes(int... values) {
+        byte[] out = new byte[values.length];
+        for (int i = 0; i < values.length; i++) {
+            out[i] = (byte) values[i];
+        }
+        return out;
+    }
+
+    /**
+     * {@code writeFixlen} is this corelib's byte-container string entry point, so
+     * it owns the encode half of the strict-UTF-8 contract for raw bytes
+     * (CORELIB_PLAN §6.4): a STRING payload that is not well-formed UTF-8 is
+     * refused with ARGUMENT and nothing reaches the buffer (issue #73).
+     */
+    @Test
+    void writeFixlenRejectsInvalidUtf8String() throws IOException {
+        byte[] buf = new byte[64];
+        OStream os = new OStream(buf);
+        byte[] bad = {(byte) 0xFF, (byte) 0xFE, (byte) 0xC0, (byte) 0x80};
+
+        SofabException ex = assertThrows(SofabException.class,
+                () -> os.writeFixlen(1, bad, 0, bad.length, FixlenType.STRING));
+        assertEquals(SofabError.ARGUMENT, ex.error());
+        assertEquals(0, os.bytesUsed(), "a refused string must emit no bytes");
+
+        // The very same bytes are legal as an opaque blob, and the stream is still
+        // usable after the rejection.
+        os.writeFixlen(1, bad, 0, bad.length, FixlenType.BLOB);
+        assertArrayEquals(bytes(0x0A, 0x23, 0xFF, 0xFE, 0xC0, 0x80),
+                Arrays.copyOf(buf, os.bytesUsed()));
+    }
+
+    /** Only the STRING sub-range is validated, not the whole backing array. */
+    @Test
+    void writeFixlenValidatesOnlyTheGivenRange() throws IOException {
+        byte[] buf = new byte[64];
+        byte[] data = {(byte) 0xFF, 'h', 'i', (byte) 0xFF};
+        OStream os = new OStream(buf);
+        os.writeFixlen(1, data, 1, 2, FixlenType.STRING);
+        assertArrayEquals(bytes(0x0A, 0x12, 'h', 'i'), Arrays.copyOf(buf, os.bytesUsed()));
+
+        OStream os2 = new OStream(new byte[64]);
+        SofabException ex = assertThrows(SofabException.class,
+                () -> os2.writeFixlen(1, data, 1, 3, FixlenType.STRING));
+        assertEquals(SofabError.ARGUMENT, ex.error());
+    }
+
+    /** A valid UTF-8 payload — including an empty one — still goes through. */
+    @Test
+    void writeFixlenAcceptsValidUtf8String() throws IOException {
+        byte[] buf = new byte[64];
+        OStream os = new OStream(buf);
+        byte[] utf8 = "äb".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        os.writeFixlen(1, utf8, 0, utf8.length, FixlenType.STRING);
+        os.writeFixlen(2, null, 0, 0, FixlenType.STRING);
+        assertArrayEquals(bytes(0x0A, 0x1A, 0xC3, 0xA4, 0x62, 0x12, 0x02),
+                Arrays.copyOf(buf, os.bytesUsed()));
+    }
+
     /** Records arrayBegin(count) plus any element callbacks, to prove a zero-count array fires once and carries no elements. */
     private static final class ArrayRecorder implements Visitor {
         int beginCount = -1;

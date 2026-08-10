@@ -254,9 +254,16 @@ throughout, with state in caller-provided arrays plus a small fixed object.
   string type, so the only value it cannot represent as well-formed UTF-8 is an
   unpaired UTF-16 surrogate; `writeString` rejects such a string with
   `SofabException` (`ARGUMENT`) **before** emitting any bytes, never lossily
-  substituting a replacement character. There is no strict mode to toggle. On the
-  decode side the strict-UTF-8 check lives in generated code, which materializes
-  the `String` with a REPORTing `CharsetDecoder` that raises `INVALID_MSG`.
+  substituting a replacement character. There is no strict mode to toggle. The
+  same rule binds the **byte-container** entry point: `writeFixlen(id, data, from,
+  length, FixlenType.STRING)` takes raw bytes, so it validates that range with
+  `Utf8.valid` and refuses a malformed payload with `ARGUMENT`, again before a
+  byte is written — this API cannot emit a string the family's own decoders would
+  reject. `FixlenType.BLOB` is the type for opaque bytes and is never validated,
+  so the other fixlen writers (`writeBlob`, `writeFp32/64`) pay only one enum
+  comparison. On the decode side the strict-UTF-8 check lives in generated code,
+  which materializes the `String` with a REPORTing `CharsetDecoder` that raises
+  `INVALID_MSG`.
 - **Decode (`IStream` + `Visitor`).** `feed` runs a cursor over the caller's input
   `byte[]`, **aliasing** it. Scalars and floats are passed **by value** (`long` /
   `double`); strings and blobs are handed to the visitor as a **window** (`data`,
