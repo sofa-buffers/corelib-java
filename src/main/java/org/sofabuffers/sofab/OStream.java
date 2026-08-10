@@ -556,16 +556,31 @@ public final class OStream {
      * length header, then {@code length} raw bytes from {@code data} (already in
      * wire / little-endian order for floats).
      *
+     * <p>This is the <b>byte-container</b> string entry point, so it carries the
+     * same strict-UTF-8 encode obligation as {@link #writeString} (CORELIB_PLAN
+     * §6.4, MESSAGE_SPEC §8): with {@link FixlenType#STRING} the payload range is
+     * validated and a malformed one is refused with {@link SofabError#ARGUMENT}
+     * <em>before</em> any byte is emitted, so this API cannot produce a message
+     * that the family's own decoders reject. Every other sub-type — including
+     * {@link FixlenType#BLOB}, the type for opaque bytes — passes through
+     * unvalidated at the cost of one enum comparison.
+     *
      * @param id      field id
      * @param data    payload bytes (may be {@code null} only if {@code length} is 0)
      * @param from    start offset within {@code data}
      * @param length  number of payload bytes
      * @param subtype fixed-length sub-type
+     * @throws SofabException with {@link SofabError#ARGUMENT} if {@code length} is
+     *         negative, or if {@code subtype} is {@link FixlenType#STRING} and the
+     *         payload range is not well-formed UTF-8
      * @throws IOException on buffer overflow or sink failure
      */
     public void writeFixlen(int id, byte[] data, int from, int length, FixlenType subtype) throws IOException {
         if (length < 0) {
             throw new SofabException(SofabError.ARGUMENT, "length " + length);
+        }
+        if (subtype == FixlenType.STRING && !Utf8.valid(data, from, from + length)) {
+            throw new SofabException(SofabError.ARGUMENT, "invalid UTF-8 string payload");
         }
         writeIdTypeValue(id, T_FIXLEN, ((long) length << 3) | subtype.raw());
         pushRaw(data, from, length);

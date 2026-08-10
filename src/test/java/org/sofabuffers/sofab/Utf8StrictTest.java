@@ -10,12 +10,14 @@
  * with SofabError.ARGUMENT, and must never lossily substitute a replacement byte.
  *
  * The shared negative vectors (assets/test_vectors.json "invalid_utf8", tracking
- * corelib-c-cpp#97) are exercised two ways here: (1) their raw payload bytes are
+ * corelib-c-cpp#97) are exercised three ways here: (1) their raw payload bytes are
  * fed to the same REPORTing UTF-8 decoder the generated code uses and must be
- * rejected (the decode-reject direction), and (2) the two lone-surrogate vectors
- * are mapped to a one-char String and must be refused by writeString (the
- * encode-reject direction). All other invalid_utf8 payloads are byte-level
- * malformations no Java String can ever hold, so they are only decode-reject.
+ * rejected (the decode-reject direction), (2) the two lone-surrogate vectors are
+ * mapped to a one-char String and must be refused by writeString, and (3) every
+ * payload — including the byte-level malformations no Java String can ever hold —
+ * is offered to the byte-container entry point OStream.writeFixlen(..., STRING),
+ * which must refuse it too (issue #73): both are the encode-reject direction the
+ * vectors' `encode_outcome: "invalid_argument"` asks for.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -325,6 +327,45 @@ class Utf8StrictTest {
                     () -> assertEncodeRejects(String.valueOf(surrogate))));
         }
         assertEquals(2, tests.size(), "expected the two lone-surrogate vectors");
+        return tests;
+    }
+
+    /**
+     * The byte-container encode direction: {@code writeFixlen(..., STRING)} takes
+     * raw bytes, so every invalid_utf8 payload — not just the two representable as
+     * a Java String — must be refused there with ARGUMENT, matching the vectors'
+     * {@code encode_outcome: "invalid_argument"}, with no bytes emitted. Offering
+     * the same payload as a BLOB must still succeed: the check is on the string
+     * sub-type only (issue #73).
+     */
+    @TestFactory
+    List<DynamicTest> invalidUtf8FixlenStringEncodeRejected() {
+        List<DynamicTest> tests = new ArrayList<>();
+        for (JsonElement ve : loadInvalidUtf8()) {
+            JsonObject v = ve.getAsJsonObject();
+            String name = v.get("name").getAsString();
+            byte[] payload = hex(v.get("string_hex").getAsString());
+            tests.add(DynamicTest.dynamicTest("encode-reject-fixlen:" + name, () -> {
+                assertEquals("invalid_argument", v.get("encode_outcome").getAsString());
+                assertTrue(!Utf8.valid(payload, 0, payload.length), name + ": vector must be invalid UTF-8");
+
+                byte[] buf = new byte[64];
+                OStream os = new OStream(buf);
+                SofabException ex = assertThrows(SofabException.class,
+                        () -> os.writeFixlen(1, payload, 0, payload.length, FixlenType.STRING),
+                        name + ": writeFixlen must refuse an invalid UTF-8 string payload");
+                assertEquals(SofabError.ARGUMENT, ex.error());
+                assertEquals(0, os.bytesUsed(), name + ": a refused string must emit no bytes");
+
+                // Same bytes as an opaque blob: accepted, and byte-identical to the
+                // payload after the two header bytes.
+                os.writeFixlen(1, payload, 0, payload.length, FixlenType.BLOB);
+                assertArrayEquals(payload,
+                        Arrays.copyOfRange(buf, 2, os.bytesUsed()),
+                        name + ": blob payload must pass through verbatim");
+            }));
+        }
+        assertTrue(tests.size() >= 11, "expected the shared invalid_utf8 vectors");
         return tests;
     }
 
