@@ -501,12 +501,12 @@ public final class IStream {
         if (state == S_FIXLEN_RAW) {
             int take = Math.min(end - i, fixlenRemaining);
             int chunkOffset = fixlenTotal - fixlenRemaining;
+            // S_FIXLEN_RAW is armed for F_STRING and F_BLOB only — the two sub-types
+            // with a streaming payload — so there is no third case to guard against.
             if (fixlenSubtype == F_STRING) {
                 visitor.string(id, fixlenTotal, chunkOffset, data, i, take);
-            } else if (fixlenSubtype == F_BLOB) {
-                visitor.blob(id, fixlenTotal, chunkOffset, data, i, take);
             } else {
-                throw new SofabException(SofabError.INVALID_MSG, "raw fixlen type");
+                visitor.blob(id, fixlenTotal, chunkOffset, data, i, take);
             }
             fixlenRemaining -= take;
             if (fixlenRemaining == 0) {
@@ -598,6 +598,10 @@ public final class IStream {
      * just past the bytes consumed; when the field cannot be completed within the
      * buffer the resumable state machine is armed and the index is left at the
      * first byte the machine must re-read.
+     *
+     * <p>Only wire types 2..5 arrive here: {@link #feed} decodes 0/1 inline and
+     * handles both sequence markers before the call, so the four cases below are
+     * exhaustive and the last one needs no separate fallback.
      */
     private int fastCompound(byte[] data, int p, int end, Visitor visitor, int wireType)
             throws SofabException {
@@ -613,11 +617,10 @@ public final class IStream {
                 fixlenArray = false;
                 return fastVarintArray(data, p, end, visitor, true);
             case T_FIXLENARRAY:
+            default:
                 // arrayKind stays unsettled until the fixlen_word names the subtype.
                 fixlenArray = true;
                 return fastFixlenArray(data, p, end, visitor);
-            default:
-                throw new SofabException(SofabError.INVALID_MSG, "field type " + wireType);
         }
     }
 
@@ -757,6 +760,7 @@ public final class IStream {
                 return p + 8;
             case F_STRING:
             case F_BLOB:
+            default: // the check above leaves 0..3, so these two are what remains
                 fixlenSubtype = subtype;
                 fixlenTotal = length;
                 fixlenRemaining = length;
@@ -774,8 +778,6 @@ public final class IStream {
                     state = S_FIXLEN_RAW; // feed loop streams the payload in bulk
                 }
                 return p;
-            default:
-                throw new SofabException(SofabError.INVALID_MSG, "fixlen type " + subtype);
         }
     }
 
@@ -966,13 +968,12 @@ public final class IStream {
                 throw new SofabException(SofabError.INVALID_MSG, "fp64 length " + lengthValue);
             }
             size = 8;
-        } else if (subtype == F_STRING || subtype == F_BLOB) {
-            // String/blob are not valid as fixlen-array elements (§4.8). This is a
-            // FORMAT violation, judged before the visitor is offered the field, so
-            // it can never be turned into a §7.3 skip.
-            throw new SofabException(SofabError.INVALID_MSG, "dynamic fixlen array element");
         } else {
-            throw new SofabException(SofabError.INVALID_MSG, "fixlen type " + subtype);
+            // What the check above leaves: string/blob, which are not valid as
+            // fixlen-array elements (§4.8). This is a FORMAT violation, judged
+            // before the visitor is offered the field, so it can never be turned
+            // into a §7.3 skip.
+            throw new SofabException(SofabError.INVALID_MSG, "dynamic fixlen array element");
         }
         fixlenSubtype = subtype;
         fixlenTotal = size;
@@ -1146,6 +1147,9 @@ public final class IStream {
      * validate the id, record the wire type, and arm the state for the value that
      * follows. Sequence start/end are emitted here and leave the machine
      * {@code S_IDLE} (they carry no value).
+     *
+     * <p>The wire type is three bits, and all eight of its values are real cases
+     * below (§4.3), so the dispatch is exhaustive and carries no unknown-type arm.
      */
     private void stepIdle(int b, Visitor visitor) throws SofabException {
         if (!varintPush(b)) {
@@ -1195,6 +1199,7 @@ public final class IStream {
                 visitor.sequenceBegin(id);
                 break;
             case T_SEQUENCE_END:
+            default: // 0..7 are all named above; this is type 7
                 if (depth == 0) {
                     throw new SofabException(SofabError.INVALID_MSG, "dangling sequence end");
                 }
@@ -1202,8 +1207,6 @@ public final class IStream {
                 state = S_IDLE;
                 visitor.sequenceEnd();
                 break;
-            default:
-                throw new SofabException(SofabError.INVALID_MSG, "field type " + wireType);
         }
     }
 
@@ -1300,6 +1303,7 @@ public final class IStream {
                 break;
             case F_STRING:
             case F_BLOB:
+            default: // the check above leaves 0..3, so these two are what remains
                 // String/blob are not valid as fixlen-array elements: a FORMAT
                 // violation (§4.8), rejected before the field is ever offered to
                 // the visitor, so it can never become a §7.3 skip.
@@ -1319,8 +1323,6 @@ public final class IStream {
                     state = S_FIXLEN_RAW;
                 }
                 break;
-            default:
-                throw new SofabException(SofabError.INVALID_MSG, "fixlen type " + subtype);
         }
     }
 
@@ -1341,8 +1343,12 @@ public final class IStream {
      * Accumulate the fixed-size bytes of a float value into {@link #acc}; once all
      * are in, decode the fp32/fp64 from little-endian, emit it, and advance to the
      * next array element (reusing the element size) or back to idle.
+     *
+     * <p>{@link #S_FIXLEN_VAL} is armed for fp32 and fp64 alone — string and blob
+     * stream through {@link #S_FIXLEN_RAW} instead — so fp64 is simply the other
+     * case, with nothing left over to reject.
      */
-    private void stepFixlenVal(int b, Visitor visitor) throws SofabException {
+    private void stepFixlenVal(int b, Visitor visitor) {
         byte[] a = acc;
         if (a == null) {
             a = acc = new byte[8]; // first straddling float on this stream
@@ -1359,14 +1365,12 @@ public final class IStream {
                     | ((a[2] & 0xFF) << 16)
                     | ((a[3] & 0xFF) << 24);
             visitor.fp32(id, Float.intBitsToFloat(bits));
-        } else if (fixlenSubtype == F_FP64) {
+        } else {
             long bits = 0;
             for (int i = 0; i < 8; i++) {
                 bits |= ((long) (a[i] & 0xFF)) << (i * 8);
             }
             visitor.fp64(id, Double.longBitsToDouble(bits));
-        } else {
-            throw new SofabException(SofabError.INVALID_MSG, "fixlen value type");
         }
 
         // Next array element (reuse the element size) or back to idle.
