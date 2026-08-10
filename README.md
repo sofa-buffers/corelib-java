@@ -22,9 +22,9 @@ anywhere a JVM does.
 
 Like protobuf-java's `CodedInputStream` / `CodedOutputStream`, this library is
 driven by **generated code**: a schema-driven generator emits one class per message
-plus marshal / unmarshal methods that call the primitives here. Decoding uses the
-**visitor pattern**, so a generated message is typically a single `switch` over the
-field id. The wire format is specified language-neutrally in the
+plus the `serialize` / `deserialize` pair that calls the primitives here. Decoding
+uses the **visitor pattern**, so a generated message is typically a single `switch`
+over the field id. The wire format is specified language-neutrally in the
 [SofaBuffers documentation](https://github.com/sofa-buffers/documentation).
 
 ### Package name
@@ -183,11 +183,20 @@ whatever sizes your transport produces.
 ### Code generator
 
 The common real use is driving the runtime through **generated code**: `sofabgen`
-emits one class per message with a `marshal`, a `byte[] encode()` that marshals
-into a `MAX_SIZE` buffer, and a `static decode` built on a `Visitor`. A hand-written
-stand-in, encoded then decoded:
+emits one class per message whose whole wire surface is the family-wide name set —
+`serialize(OStream)` writes the fields into a stream the caller owns, `byte[]
+encode()` wraps it over a `MAX_SIZE` buffer, `decode(byte[])` (and its
+status-returning sibling `tryDecode(byte[], out)`) wraps the decoder over one
+complete buffer, and `decoder()` hands back the streaming reader. **Both halves are
+the same code path**: the one-shot pair is a thin wrapper over the streaming one,
+which is why a message that streams and a message that fits in a buffer produce
+identical bytes.
+
+A hand-written stand-in — the generator emits the visitor as its own class, folded
+into the message here for brevity — encoded, decoded, then decoded again in chunks:
 
 ```java
+import java.io.IOException;
 import java.util.Arrays;
 import org.sofabuffers.sofab.*;
 
@@ -196,19 +205,40 @@ final class Point implements Visitor {
     long x, y;
     static final int MAX_SIZE = 32;
 
-    void marshal(OStream os) { os.writeSigned(1, x); os.writeSigned(2, y); }
+    // streaming out: write the fields into a stream the caller owns
+    public void serialize(OStream os) throws IOException {
+        os.writeSigned(1, x);
+        os.writeSigned(2, y);
+    }
 
-    byte[] encode() {
+    // one-shot: serialize into a MAX_SIZE buffer, hand back an exact-size copy
+    public byte[] encode() {
         byte[] buf = new byte[MAX_SIZE];
         OStream os = new OStream(buf);
-        marshal(os);
+        try { serialize(os); } catch (IOException e) { throw new RuntimeException(e); }
         return Arrays.copyOf(buf, os.bytesUsed());
     }
 
-    static Point decode(byte[] data) {
+    // one-shot: the same streaming decode, over one complete buffer
+    public static Point decode(byte[] data) throws SofabException {
         Point p = new Point();
-        new IStream().feed(data, 0, data.length, p);
+        new IStream().feed(data, p);
         return p;
+    }
+
+    // streaming in: a reader fed chunks of any size
+    public static Decoder decoder() { return new Decoder(); }
+
+    static final class Decoder {
+        private final Point p = new Point();
+        private final IStream is = new IStream();
+
+        public DecodeStatus feed(byte[] chunk, int off, int len) throws SofabException {
+            is.feed(chunk, off, len, p);
+            return is.status();          // COMPLETE / INCOMPLETE; INVALID throws
+        }
+
+        public Point message() { return p; }
     }
 
     @Override public void signed(int id, long v) {
@@ -218,8 +248,20 @@ final class Point implements Visitor {
 
 Point p = new Point(); p.x = 3; p.y = 4;
 byte[] wire = p.encode();
-Point got = Point.decode(wire);       // got.x == 3, got.y == 4
+Point got = Point.decode(wire);                 // got.x == 3, got.y == 4
+
+// the streaming half: the same message, one byte at a time
+Point.Decoder dec = Point.decoder();
+for (byte b : wire) dec.feed(new byte[] { b }, 0, 1);
+Point streamed = dec.message();                 // streamed.x == 3, streamed.y == 4
 ```
+
+`feed` returns the outcome for the bytes seen so far — `COMPLETE` on a field
+boundary, `INCOMPLETE` mid-field, and malformed bytes throw (`INVALID`, terminal).
+The top level has no end marker, so *the caller's* framing decides when the input is
+over; a still-`INCOMPLETE` status at that point is a truncated message. Give the
+encoder's `OStream` a `FlushSink` and the same `serialize` streams a message larger
+than the buffer, so neither direction ever needs the whole message in RAM.
 
 ## Memory handling
 
