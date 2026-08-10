@@ -4,14 +4,15 @@
  * MESSAGE_SPEC §8 / CORELIB_PLAN §6.4: a `string` field is always strict,
  * well-formed UTF-8. Java's `String` is a Unicode string type, so on the DECODE
  * side materialization (and therefore the strict-UTF-8 check) lives in generated
- * code, which decodes with a REPORTing CharsetDecoder that raises INVALID_MSG on
- * bad bytes. This corelib owns the ENCODE side: OStream.writeString must refuse a
- * String it cannot represent as well-formed UTF-8 (an unpaired UTF-16 surrogate)
- * with SofabError.ARGUMENT, and must never lossily substitute a replacement byte.
+ * code, which validates the assembled payload with this corelib's own Utf8.valid
+ * and raises INVALID_MSG on bad bytes. This corelib owns the ENCODE side:
+ * OStream.writeString must refuse a String it cannot represent as well-formed
+ * UTF-8 (an unpaired UTF-16 surrogate) with SofabError.ARGUMENT, and must never
+ * lossily substitute a replacement byte.
  *
  * The shared negative vectors (assets/test_vectors.json "invalid_utf8", tracking
  * corelib-c-cpp#97) are exercised three ways here: (1) their raw payload bytes are
- * fed to the same REPORTing UTF-8 decoder the generated code uses and must be
+ * put through the same validator the generated code calls and must be
  * rejected (the decode-reject direction), (2) the two lone-surrogate vectors are
  * mapped to a one-char String and must be refused by writeString, and (3) every
  * payload — including the byte-level malformations no Java String can ever hold —
@@ -25,6 +26,7 @@ package org.sofabuffers.sofab;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.sofabuffers.sofab.common.Wire.bytes;
@@ -34,11 +36,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.UncheckedIOException;
-import java.nio.ByteBuffer;
-import java.nio.CharBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CharsetDecoder;
-import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -74,13 +71,6 @@ class Utf8StrictTest {
             out[i] = (byte) Integer.parseInt(s.substring(2 * i, 2 * i + 2), 16);
         }
         return out;
-    }
-
-    /** The REPORTing UTF-8 decoder the generated Java decode path uses. */
-    private static CharsetDecoder strictDecoder() {
-        return StandardCharsets.UTF_8.newDecoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT);
     }
 
     // ---- encode-reject: unpaired surrogates -----------------------------------
@@ -206,7 +196,7 @@ class Utf8StrictTest {
         }
     }
 
-    /** Every invalid_utf8 payload must be rejected by the REPORTing UTF-8 decoder. */
+    /** Every invalid_utf8 payload must be rejected by the validator generated code calls. */
     @TestFactory
     List<DynamicTest> invalidUtf8DecodeRejected() {
         List<DynamicTest> tests = new ArrayList<>();
@@ -217,9 +207,8 @@ class Utf8StrictTest {
                 assertEquals("invalid", v.get("decode_outcome").getAsString());
                 assertEquals("invalid_argument", v.get("encode_outcome").getAsString());
                 byte[] payload = hex(v.get("string_hex").getAsString());
-                assertThrows(CharacterCodingException.class,
-                        () -> strictDecoder().decode(ByteBuffer.wrap(payload)),
-                        name + ": strict decoder must reject invalid UTF-8");
+                assertFalse(Utf8.valid(payload, 0, payload.length),
+                        name + ": the strict validator must reject invalid UTF-8");
             }));
         }
         assertTrue(tests.size() >= 11, "expected the shared invalid_utf8 vectors");
@@ -228,11 +217,11 @@ class Utf8StrictTest {
 
     /**
      * A strict string sink, exactly as generated code builds one: it accumulates
-     * the chunks of the string field and materializes it with the REPORTing
-     * decoder once the declared payload is complete — a multi-byte sequence merely
-     * split at a chunk boundary is INCOMPLETE, not INVALID — raising INVALID_MSG
-     * wrapped in an {@link UncheckedIOException}, since {@link Visitor} declares no
-     * checked exception.
+     * the chunks of the string field and validates the assembled bytes with
+     * {@link Utf8#valid} once the declared payload is complete — a multi-byte
+     * sequence merely split at a chunk boundary is INCOMPLETE, not INVALID —
+     * raising INVALID_MSG wrapped in an {@link UncheckedIOException}, since
+     * {@link Visitor} declares no checked exception.
      */
     private static final class StrictStringSink implements Visitor {
         private final ByteArrayOutputStream buf = new ByteArrayOutputStream();
@@ -245,9 +234,7 @@ class Utf8StrictTest {
             }
             byte[] payload = buf.toByteArray();
             buf.reset();
-            try {
-                strictDecoder().decode(ByteBuffer.wrap(payload));
-            } catch (CharacterCodingException e) {
+            if (!Utf8.valid(payload, 0, payload.length)) {
                 throw new UncheckedIOException(
                         new SofabException(SofabError.INVALID_MSG, "string is not valid UTF-8"));
             }
@@ -362,15 +349,16 @@ class Utf8StrictTest {
         return tests;
     }
 
-    /** Sanity: a valid String the strict decoder accepts also encodes cleanly. */
+    /** Sanity: a valid String the strict validator accepts also encodes cleanly. */
     @Test
-    void strictDecoderAcceptsValidRoundTrip() throws Exception {
+    void strictValidatorAcceptsValidRoundTrip() throws Exception {
         String value = "a\u0000b äöü 😀";
         byte[] out = encode(os -> os.writeString(0, value));
-        // Strip the 2-byte header (id+type, then the fixlen varint) and decode the
-        // payload with the strict decoder to confirm it is well-formed UTF-8.
+        // Strip the 2-byte header (id+type, then the fixlen varint); the payload must
+        // pass the validator generated code runs, and materialize back to the input.
         byte[] payload = Arrays.copyOfRange(out, 2, out.length);
-        CharBuffer decoded = strictDecoder().decode(ByteBuffer.wrap(payload));
-        assertEquals(value, decoded.toString());
+        assertTrue(Utf8.valid(payload, 0, payload.length),
+                "a String this corelib encoded must be well-formed UTF-8");
+        assertEquals(value, new String(payload, StandardCharsets.UTF_8));
     }
 }
