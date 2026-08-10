@@ -230,8 +230,17 @@ throughout, with state in caller-provided arrays plus a small fixed object.
   the flush it was made in, so a sink that wants framing-header room in *every* unit
   re-arms it on each flush (passing the same array again is a new installation like
   any other), while a `bufferSet` made outside a sink reserves room in the current
-  unit only. A replacement with no room left (`offset == buf.length`) raises
-  `BUFFER_FULL` at the write in flight. A multi-byte varint is
+  unit only. **`MIN_OUTPUT_BUFFER` is `1`** (`Sofab.MIN_OUTPUT_BUFFER`, CORELIB_PLAN
+  §5.1): the encoder splits every atomic unit — no varint, string run or array
+  element has to land contiguously — so one usable byte is enough, and any size at or
+  above it produces output byte-identical to the one-shot path. **It binds a buffer
+  installed *with* a sink**, at construction and at every `bufferSet`, both of which
+  reject `buf.length - offset < MIN_OUTPUT_BUFFER` with `IllegalArgumentException`
+  where the buffer is handed over — so a replacement with no room left
+  (`offset == buf.length`) fails *in that `bufferSet` call*, not at some later write.
+  A buffer installed **without** a sink is subject to no minimum: no flush can occur,
+  so it either holds the message or raises `BUFFER_FULL`, and sizing from the
+  generated `MAX_SIZE` stays exact. A multi-byte varint is
   assembled in a register and stored eight bytes at a time, so the encoder may leave
   up to **seven scratch bytes** in the buffer just past the write position; they are
   never part of the message, sit strictly between `bytesUsed()` and the end of the
