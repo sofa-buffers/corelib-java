@@ -37,9 +37,12 @@ import static org.sofabuffers.sofab.WireFormat.zigzagDecode;
  * dispatch (the "advance a pointer over a contiguous buffer" technique). The
  * moment a field — or array element — would run past the end of the supplied
  * bytes, a resumable byte-at-a-time state machine takes over, suspends, and
- * resumes on the next {@code feed}. The two paths are byte-for-byte equivalent;
- * the fast path simply removes the per-byte overhead from the common case where a
- * message (or a large chunk of one) arrives in a single feed.
+ * resumes on the next {@code feed}. Only that one construct pays for the split:
+ * the moment it completes, the rest of the chunk goes back to the fast path —
+ * within an array as much as between fields, so a boundary inside a long array
+ * costs one element and not its remainder. The two paths are byte-for-byte
+ * equivalent; the fast path simply removes the per-byte overhead from the common
+ * case where a message (or a large chunk of one) arrives in a single feed.
  *
  * <p>Unlike the C decoder there is no per-field "bind a destination" step and no
  * explicit skip bookkeeping: a {@link Visitor} simply ignores fields it does not
@@ -198,6 +201,18 @@ public final class IStream {
      */
     private boolean invalid;
 
+    /**
+     * Bytes of the current message handed to the resumable byte-at-a-time machine
+     * ({@link #step}). The decoder never reads it: the two decode paths are
+     * byte-for-byte equivalent, so this counter is the only thing that tells them
+     * apart, and {@code StreamingArrayFastPathTest} reads it to prove that a chunk
+     * boundary inside an array costs the machine the one straddling element rather
+     * than the array's whole remainder (corelib-java#74). Package-private, not
+     * public API. One increment on a path that already pays a state dispatch per
+     * byte; the bulk paths never touch it.
+     */
+    long machineBytes;
+
     /** Create a fresh decoder ready to accept a new message. */
     public IStream() {
     }
@@ -238,6 +253,7 @@ public final class IStream {
         accLen = 0;
         depth = 0;
         invalid = false;
+        machineBytes = 0;
         // Pure scratch — every path writes these before it reads them — but cleared
         // anyway so "reset restores every declared field" needs no exception for
         // them, and the reflective guard can hold the whole class to it.
@@ -472,6 +488,12 @@ public final class IStream {
      * Continue a field whose bytes were split across {@code feed} calls: stream a
      * string/blob payload in bulk, or hand one byte to the resumable state machine.
      * Returns the index just past the bytes consumed.
+     *
+     * <p>Only the construct that actually straddled the boundary needs the machine.
+     * When that byte completes an array element (or the count / {@code fixlen_word}
+     * that arms one) and elements remain, the rest of the chunk goes straight back
+     * to the bulk element loop, so a boundary anywhere inside an array costs one
+     * element rather than every element after it (corelib-java#74).
      */
     private int resume(byte[] data, int i, int end, Visitor visitor) throws SofabException {
         // Bulk path: stream string/blob payloads with one callback per chunk
@@ -495,7 +517,36 @@ public final class IStream {
         // Every other non-idle state covers a partially read value or payload, and
         // S_HEADER covers a partially read field header.
         step(data[i] & 0xFF, visitor);
-        return i + 1;
+        int p = i + 1;
+        if (inArray && p < end) {
+            // Back at an element boundary with elements left and bytes left: the
+            // element loops pick up exactly where the machine stopped, reading
+            // arrayRemaining and id from the fields the machine just updated.
+            // "Nothing accumulated" is what says the machine is between elements —
+            // varintShift == 0 for a varint array, accLen == 0 for a float one —
+            // and it also holds right after a count word or fixlen_word completes,
+            // which arms the same states with the array already announced.
+            switch (state) {
+                case S_VARINT_UNSIGNED:
+                    if (varintShift == 0) {
+                        return unsignedElements(data, p, end, visitor);
+                    }
+                    break;
+                case S_VARINT_SIGNED:
+                    if (varintShift == 0) {
+                        return signedElements(data, p, end, visitor);
+                    }
+                    break;
+                case S_FIXLEN_VAL:
+                    if (accLen == 0) {
+                        return fixlenElements(data, p, end, visitor, fixlenTotal);
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+        return p;
     }
 
     /**
@@ -930,6 +981,18 @@ public final class IStream {
         // is what lets a visitor skip a field whose subtype contradicts its schema
         // without judging the count against a bound that does not apply to it.
         arrayBeginFixlen(size == 4 ? ArrayKind.FP32 : ArrayKind.FP64, visitor);
+        return fixlenElements(data, p, end, visitor, size);
+    }
+
+    /**
+     * Payload elements of a fixlen (fp32/fp64) array; {@code p} points at the next
+     * element and {@code size} is its width, 4 or 8. Split out of
+     * {@link #fastFixlenArray} because {@link #resume} re-enters it once the
+     * machine has finished an element that straddled a chunk boundary: by then the
+     * count, the {@code fixlen_word} and {@code arrayBegin} are all behind us, so
+     * only the payload loop may run again.
+     */
+    private int fixlenElements(byte[] data, int p, int end, Visitor visitor, int size) {
         int remaining = arrayRemaining;
         final int fieldId = id;
         if (size == 4) {
@@ -1031,6 +1094,7 @@ public final class IStream {
      * the visitor and transitions {@link #state} to the next field or element.
      */
     private void step(int b, Visitor visitor) throws SofabException {
+        machineBytes++;
         switch (state) {
             case S_IDLE:
             case S_HEADER:          stepIdle(b, visitor); break;
