@@ -370,7 +370,8 @@ bash bench/run_callgrind.sh                                                  # i
 `Perf` reports thread-CPU-time ns/op (the JVM exposes no portable cycle counter; run
 under an external counter such as `perf stat -e instructions:u …` for a
 CPU-speed-independent number). `Bench` reports encode / decode throughput in MB/s
-over a ~1 s CPU-time loop. `bench/run_callgrind.sh` (needs `valgrind`) reports
+over a ~1 s CPU-time loop. `bench/run_callgrind.sh` (needs `valgrind`, which the
+`.devcontainer/` image installs) reports
 **instructions retired per op** (Ir/op) under Callgrind — deterministic and
 independent of clock speed and scheduler, so the numbers compare across machines and
 against the sibling ports. There is no JIT-compiled `run_<workload>` symbol to toggle
