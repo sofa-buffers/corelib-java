@@ -9,6 +9,13 @@ package org.sofabuffers.sofab;
  * Sub-type of a fixed-length field — the 3-bit tag encoded in the low bits of a
  * fixlen length header (see the SofaBuffers documentation, "Fixlen Length and
  * Type").
+ *
+ * <p>The tag travels <em>outwards</em> only: encoders name a sub-type with one of
+ * these constants and {@link #raw()} turns it into the wire tag, while the decoder
+ * narrows an incoming tag itself at each site that reads a fixlen word — rejecting
+ * the reserved values 0x4..0x7 there — and hands the visitor the matching constant.
+ * There is deliberately no wire-tag-to-constant entry point: it would be public API
+ * with no caller and no reachable failure mode.
  */
 public enum FixlenType {
     /** 32-bit IEEE-754 float, little-endian on the wire. */
@@ -33,23 +40,5 @@ public enum FixlenType {
      */
     public int raw() {
         return raw;
-    }
-
-    /**
-     * Decode a 3-bit fixlen tag from the wire.
-     *
-     * @param raw the tag value (low 3 bits of the fixlen header)
-     * @return the matching {@link FixlenType}
-     * @throws SofabException with {@link SofabError#INVALID_MSG} for a reserved
-     *                        or unsupported tag
-     */
-    public static FixlenType fromRaw(int raw) throws SofabException {
-        switch (raw) {
-            case 0x0: return FP32;
-            case 0x1: return FP64;
-            case 0x2: return STRING;
-            case 0x3: return BLOB;
-            default:  throw new SofabException(SofabError.INVALID_MSG, "fixlen type " + raw);
-        }
     }
 }

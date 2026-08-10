@@ -11,7 +11,6 @@ import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
 import java.util.Arrays;
 
-import static org.sofabuffers.sofab.WireFormat.ID_MAX;
 import static org.sofabuffers.sofab.WireFormat.T_FIXLEN;
 import static org.sofabuffers.sofab.WireFormat.T_FIXLENARRAY;
 import static org.sofabuffers.sofab.WireFormat.T_SEQUENCE_END;
@@ -468,7 +467,10 @@ public final class OStream {
      * share them without also being forced through a separate header write.
      */
     private void beginField(int id) throws IOException {
-        if (id < 0 || id > ID_MAX) {
+        // The id ceiling is ID_MAX == INT32_MAX (§6.2), so an int argument can only
+        // leave the range downwards: the sign test is the whole check, and this is
+        // the encoder's per-field choke point.
+        if (id < 0) {
             throw new SofabException(SofabError.ARGUMENT, "id " + id);
         }
         // No wire-type exemption is needed here. A sequence *header* never passes
@@ -878,13 +880,11 @@ public final class OStream {
 
     /**
      * Write an array field header (id header then element count). A zero count is
-     * valid (§4.7) and yields exactly {@code [ header ][ count = 0 ]}; only a
-     * negative count is rejected.
+     * valid (§4.7) and yields exactly {@code [ header ][ count = 0 ]}. The count is
+     * a Java array's {@code length} at every call site, so it needs no range test:
+     * it is non-negative by construction and {@code ARRAY_MAX} is {@code INT32_MAX}.
      */
     private void writeArrayHeader(int id, int wireType, int count) throws IOException {
-        if (count < 0) {
-            throw new SofabException(SofabError.ARGUMENT, "negative count " + count);
-        }
         writeIdTypeValue(id, wireType, count);
     }
 
@@ -1237,7 +1237,10 @@ public final class OStream {
         if (depth >= Sofab.MAX_DEPTH) {
             throw new SofabException(SofabError.ARGUMENT, "sequence nesting exceeds MAX_DEPTH");
         }
-        if (id < 0 || id > ID_MAX) {
+        // As in beginField: ID_MAX is INT32_MAX, so the sign test is the whole
+        // range check. This opener does not route its header through beginField —
+        // it holds it back — so it carries its own.
+        if (id < 0) {
             throw new SofabException(SofabError.ARGUMENT, "id " + id);
         }
         if (nPending == 0) {
