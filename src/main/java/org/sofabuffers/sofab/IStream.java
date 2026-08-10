@@ -569,11 +569,16 @@ public final class IStream {
 
     /**
      * Read a varint from the last few bytes of the buffer, where the
-     * eight-at-a-time path has no room. Fewer than ten bytes remain, so at most
-     * nine can be read and no {@code >64}-bit varint can complete here — the
-     * overflow test lives only on the ten-byte path. Leaves the next position in
-     * {@link #scratchPos}, or {@code -1} there when the varint runs past
-     * {@code end}.
+     * eight-at-a-time path has no room — a field header, a scalar value or an
+     * array element alike, since the hand-over condition is the same one at all
+     * three sites. Fewer than ten bytes remain, so at most nine can be read and no
+     * {@code >64}-bit varint can complete here — the overflow test lives only on
+     * the ten-byte path. Leaves the next position in {@link #scratchPos}, or
+     * {@code -1} there when the varint runs past {@code end}.
+     *
+     * <p>Kept out of line: folding it into the element loops enlarges them enough
+     * to cost the hot eight-at-a-time path registers, and one shared out-of-line
+     * reader buys that just as well as one per caller.
      */
     private long boundedVarint(byte[] data, int p, int end) {
         long v = 0;
@@ -703,6 +708,49 @@ public final class IStream {
         return p + 10;
     }
 
+    /**
+     * Judge the sub-type-independent half of a {@code fixlen_word} (§4.6) and
+     * return its sub-type. The decoder reads that word from three places — a scalar
+     * field ({@link #fastFixlenScalar}), a fixlen-array element
+     * ({@link #fastFixlenArray}) and the resumable machine ({@link #stepFixlenLen})
+     * — and these two rules belong to the word rather than to the reader, so they
+     * live here once: a reserved sub-type (4..7) is malformed, and a declared length
+     * above {@code SOFAB_FIXLEN_MAX} is malformed whatever the sub-type turns out to
+     * be. Their order is fixed here too, so a word that breaks both names the same
+     * rule wherever it is read.
+     *
+     * <p>The third §4.6 rule — fp32 declares four bytes, fp64 eight — deliberately
+     * stays behind, in each caller's arm for that sub-type. It is the one rule that
+     * needs the sub-type already selected, and every caller selects on it anyway:
+     * moving it here re-tests what the arm has just decided, which <em>measures</em>
+     * as +6 Ir/op (+0.5%) on the decode-typical workload, on a decoder whose whole
+     * typical message costs 1195. Since it cannot be shared for free, all three
+     * sites carry a comment naming the other two so it stays changed in lockstep,
+     * and {@code DecodeRuleWrittenOnceTest} drives every wrong width through all
+     * four reading surfaces so a copy that drifts fails the suite.
+     *
+     * @param word the fixlen word, {@code (length << 3) | subtype}
+     * @return the sub-type, one of {@link #F_FP32}, {@link #F_FP64},
+     *         {@link #F_STRING}, {@link #F_BLOB}
+     * @throws SofabException {@link SofabError#INVALID_MSG} if the word carries a
+     *         reserved sub-type or a length above the format ceiling
+     */
+    private static int checkFixlenWord(long word) throws SofabException {
+        int subtype = (int) (word & 0x07);
+        // Reserved sub-types 0x4..0x7 are malformed (§4.6), and are rejected before
+        // the length is judged — the order the enum-based reader had.
+        if (subtype > F_BLOB) {
+            throw new SofabException(SofabError.INVALID_MSG, "fixlen type " + subtype);
+        }
+        // The shift is unsigned, so a word with the top bits set yields a huge
+        // length rather than a negative one, and the ceiling catches it.
+        long length = word >>> 3;
+        if (length > ARRAY_MAX) {
+            throw new SofabException(SofabError.INVALID_MSG, "fixlen length " + length);
+        }
+        return subtype;
+    }
+
     /** Fast path for a scalar fixlen field; {@code i} points at its length header. */
     private int fastFixlenScalar(byte[] data, int i, int end, Visitor visitor) throws SofabException {
         // A fixlen_word is one byte for any payload up to 15 bytes — every float,
@@ -721,17 +769,12 @@ public final class IStream {
                 return i;
             }
         }
-        int subtype = (int) (fh & 0x07);
-        // Reserved subtypes 0x4..0x7 are malformed (§4.6), and are rejected before
-        // the length is judged — the order the enum-based reader had.
-        if (subtype > F_BLOB) {
-            throw new SofabException(SofabError.INVALID_MSG, "fixlen type " + subtype);
-        }
-        long lengthValue = fh >>> 3;
-        if (lengthValue > ARRAY_MAX) {
-            throw new SofabException(SofabError.INVALID_MSG, "fixlen length " + lengthValue);
-        }
-        int length = (int) lengthValue;
+        int subtype = checkFixlenWord(fh);
+        // Judged against the ceiling above, so the cast cannot lose bits.
+        int length = (int) (fh >>> 3);
+        // The width rule below is the half of §4.6 that stays with the arm that
+        // selects the sub-type (see checkFixlenWord): fastFixlenArray and
+        // stepFixlenLen carry it too, and the three must change together.
         switch (subtype) {
             case F_FP32:
                 if (length != 4) {
@@ -800,32 +843,6 @@ public final class IStream {
                       : unsignedElements(data, p, end, visitor);
     }
 
-    /**
-     * Read an array element from the last few bytes of the buffer, where the
-     * eight-at-a-time path has no room. Fewer than ten bytes remain, so at most
-     * nine can be read and no {@code >64}-bit varint can complete here. Kept out of
-     * the element loops: folding it in enlarges them enough to cost the hot
-     * eight-at-a-time path registers. Leaves the next position in
-     * {@link #scratchPos}, or {@code -1} there when the element runs past
-     * {@code end}.
-     */
-    private long tailElement(byte[] data, int p, int end) {
-        long val = 0;
-        int vs = 0;
-        int q = p;
-        while (q < end) {
-            int b = data[q++] & 0xFF;
-            val |= ((long) (b & 0x7F)) << vs;
-            vs += 7;
-            if ((b & 0x80) == 0) {
-                scratchPos = q;
-                return val;
-            }
-        }
-        scratchPos = -1;
-        return 0;
-    }
-
     /** Elements of an unsigned varint array; {@code p} points at element 0. */
     private int unsignedElements(byte[] data, int p, int end, Visitor visitor) throws SofabException {
         // Hoist the per-element fields into locals: the loop runs once per array
@@ -856,7 +873,7 @@ public final class IStream {
                     }
                 }
             } else {
-                long tail = tailElement(data, p, end);
+                long tail = boundedVarint(data, p, end);
                 if (scratchPos < 0) {
                     // Element spills past the buffer: machine finishes it from p. The
                     // straddling element is still uncounted, so write back its count.
@@ -903,7 +920,7 @@ public final class IStream {
                     }
                 }
             } else {
-                long tail = tailElement(data, p, end);
+                long tail = boundedVarint(data, p, end);
                 if (scratchPos < 0) {
                     // Element spills past the buffer: machine finishes it from p. The
                     // straddling element is still uncounted, so write back its count.
@@ -949,14 +966,10 @@ public final class IStream {
                 return lenStart;
             }
         }
-        int subtype = (int) (fh & 0x07);
-        if (subtype > F_BLOB) {
-            throw new SofabException(SofabError.INVALID_MSG, "fixlen type " + subtype);
-        }
+        int subtype = checkFixlenWord(fh);
         long lengthValue = fh >>> 3;
-        if (lengthValue > ARRAY_MAX) {
-            throw new SofabException(SofabError.INVALID_MSG, "fixlen length " + lengthValue);
-        }
+        // Width rule, the per-arm half of §4.6 (see checkFixlenWord): the same rule
+        // lives in fastFixlenScalar and stepFixlenLen, and the three change together.
         int size;
         if (subtype == F_FP32) {
             if (lengthValue != 4) {
@@ -969,8 +982,8 @@ public final class IStream {
             }
             size = 8;
         } else {
-            // What the check above leaves: string/blob, which are not valid as
-            // fixlen-array elements (§4.8). This is a FORMAT violation, judged
+            // What the shared check above leaves: string/blob, which are not valid
+            // as fixlen-array elements (§4.8). This is a FORMAT violation, judged
             // before the visitor is offered the field, so it can never be turned
             // into a §7.3 skip.
             throw new SofabException(SofabError.INVALID_MSG, "dynamic fixlen array element");
@@ -1256,21 +1269,17 @@ public final class IStream {
             return;
         }
         long header = varintOut;
-        int subtype = (int) (header & 0x07);
-        if (subtype > F_BLOB) {
-            throw new SofabException(SofabError.INVALID_MSG, "fixlen type " + subtype);
-        }
-        long lengthValue = header >>> 3;
-        if (lengthValue > ARRAY_MAX) {
-            throw new SofabException(SofabError.INVALID_MSG, "fixlen length " + lengthValue);
-        }
-        int length = (int) lengthValue;
+        int subtype = checkFixlenWord(header);
+        // Judged against the ceiling above, so the cast cannot lose bits.
+        int length = (int) (header >>> 3);
 
         fixlenSubtype = subtype;
         fixlenTotal = length;
         fixlenRemaining = length;
         accLen = 0;
 
+        // Width rule, the per-arm half of §4.6 (see checkFixlenWord): the same rule
+        // lives in fastFixlenScalar and fastFixlenArray, and the three change together.
         switch (subtype) {
             case F_FP32:
                 if (length != 4) {
