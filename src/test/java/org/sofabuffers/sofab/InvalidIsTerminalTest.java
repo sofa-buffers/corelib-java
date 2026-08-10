@@ -236,6 +236,35 @@ class InvalidIsTerminalTest {
     }
 
     /**
+     * A visitor can also fail for reasons of its own - here the sink it writes decoded
+     * fields into, surfaced as an {@link UncheckedIOException} whose cause is a plain
+     * {@link java.io.IOException} rather than a {@link SofabException}. That says
+     * nothing about the wire either: latching INVALID on it would condemn a message
+     * never shown to be malformed and make every later feed throw, so the failure
+     * passes through untouched and the decoder stays usable.
+     */
+    @Test
+    void aVisitorsOwnIoFailureDoesNotLatchInvalid() throws Exception {
+        IStream is = new IStream();
+        Visitor failing = new Visitor() {
+            @Override
+            public void unsigned(int id, long value) {
+                throw new UncheckedIOException(new java.io.IOException("downstream sink failed"));
+            }
+        };
+
+        UncheckedIOException e = assertThrows(UncheckedIOException.class,
+                () -> is.feed(bytes(0x00, 0x2A), failing));
+        assertEquals("downstream sink failed", e.getCause().getMessage());
+        assertTrue(is.status() != DecodeStatus.INVALID, "a sink failure is not a wire verdict");
+
+        RecordingVisitor v = new RecordingVisitor();
+        is.feed(bytes(0x08, 0x07), v);
+        assertEquals(List.of("u:1=7"), v.events);
+        assertEquals(DecodeStatus.COMPLETE, is.status());
+    }
+
+    /**
      * The mirror image: generated code rejects a schema bound (MESSAGE_SPEC §7.1)
      * with INVALID_MSG from a visitor callback, and that IS the INVALID outcome -
      * so the decoder it was rejected in must report it, not COMPLETE.

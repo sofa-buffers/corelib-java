@@ -391,6 +391,86 @@ class EncoderPathCoverageTest {
                 "f32:3=3.5", "f64:4=-2.25", "f32:4096=1.5", "f64:4096=0.5"), v.events);
     }
 
+    // --- float arrays: the per-element little-endian store ------------------
+
+    /** fp32 specials plus a signaling NaN, whose payload bits must survive verbatim. */
+    private static final float[] FP32_SPECIALS = {
+        0.0f, -0.0f, 1.5f, -2.5f, Float.MIN_VALUE, Float.MAX_VALUE,
+        Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY,
+        Float.NaN, Float.intBitsToFloat(0x7F80_0001),
+    };
+
+    /** The fp64 twins of {@link #FP32_SPECIALS}. */
+    private static final double[] FP64_SPECIALS = {
+        0.0, -0.0, 1.5, -2.5, Double.MIN_VALUE, Double.MAX_VALUE,
+        Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY,
+        Double.NaN, Double.longBitsToDouble(0x7FF0_0000_0000_0001L),
+    };
+
+    /**
+     * A float array takes the check-free bulk loop only when the <em>whole</em>
+     * payload fits the buffer — fixed-width elements leave no varint slack to bound
+     * per element — and below that each element goes out on its own: a single
+     * little-endian store while the element fits the room left, and a flush-aware
+     * byte-at-a-time fallback for the one element that straddles the buffer end.
+     * Sweeping the streaming buffer from {@link Sofab#MIN_OUTPUT_BUFFER} up past the
+     * whole message drives all three, and every size must reproduce the one-shot
+     * bytes: which path emitted an element is not allowed to be visible on the wire.
+     */
+    private static void assertFloatArrayStreamsIdentically(EncodeBody body) throws IOException {
+        byte[] want = encode(body);
+        for (int size = Sofab.MIN_OUTPUT_BUFFER; size <= want.length + 4; size++) {
+            assertArrayEquals(want, encodeStreamed(size, body),
+                    "streaming through a " + size + "-byte buffer produced different output");
+        }
+    }
+
+    @Test
+    void fp32ArrayStreamsIdentically() throws IOException {
+        assertFloatArrayStreamsIdentically(os -> os.writeArrayFp32(1, FP32_SPECIALS));
+    }
+
+    @Test
+    void fp64ArrayStreamsIdentically() throws IOException {
+        assertFloatArrayStreamsIdentically(os -> os.writeArrayFp64(2, FP64_SPECIALS));
+    }
+
+    /**
+     * The payload of a NaN is data, not a flag: §6.5 requires the wire bits to come
+     * back exactly, so a signaling NaN must not arrive quieted. Asserted on raw bits
+     * (a NaN never compares equal to itself) and on the element the streamed encoder
+     * had to split, not just the ones a bulk store wrote.
+     */
+    @Test
+    void floatArrayElementsRoundTripBitExact() throws IOException {
+        byte[] wire = encodeStreamed(9, os -> {
+            os.writeArrayFp32(1, FP32_SPECIALS);
+            os.writeArrayFp64(2, FP64_SPECIALS);
+        });
+
+        int[] got32 = new int[FP32_SPECIALS.length];
+        long[] got64 = new long[FP64_SPECIALS.length];
+        int[] n = {0, 0};
+        new IStream().feed(wire, new Visitor() {
+            @Override public void fp32(int id, float value) {
+                got32[n[0]++] = Float.floatToRawIntBits(value);
+            }
+
+            @Override public void fp64(int id, double value) {
+                got64[n[1]++] = Double.doubleToRawLongBits(value);
+            }
+        });
+
+        assertEquals(FP32_SPECIALS.length, n[0]);
+        assertEquals(FP64_SPECIALS.length, n[1]);
+        for (int i = 0; i < FP32_SPECIALS.length; i++) {
+            assertEquals(Float.floatToRawIntBits(FP32_SPECIALS[i]), got32[i],
+                    "fp32 element " + i + " lost bits");
+            assertEquals(Double.doubleToRawLongBits(FP64_SPECIALS[i]), got64[i],
+                    "fp64 element " + i + " lost bits");
+        }
+    }
+
     @Test
     void bulkEncodedArrayRoundTrips() throws IOException {
         byte[] wire = encode(os -> os.writeArrayUnsigned(9, WIDE_UNSIGNED));
