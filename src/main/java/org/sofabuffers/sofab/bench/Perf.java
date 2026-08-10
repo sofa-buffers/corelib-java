@@ -4,7 +4,9 @@
  * Mirror of bench/c/perf.c, bench/cpp/perf.cpp and benches/perf.rs: encodes and
  * decodes the identical message (same field ids, types and values) through the
  * streaming API and prints the same report, so the C, C++, Rust and Java
- * implementations can be compared directly.
+ * implementations can be compared directly. The message encodes to 170 bytes on
+ * every implementation -- BENCH_SPEC's parity check: a different `message size`
+ * here means the encoding diverges.
  *
  * Two metrics per workload:
  *   1. cycles/op  -- cost of the code itself, read off a hardware cycle counter.
@@ -14,9 +16,10 @@
  *      from *thread CPU time* (not wall-clock), the JVM equivalent of the C
  *      tool's clock(). MB = 1e6 bytes.
  *
- * For a CPU-speed-independent figure on this host, run under an external counter
- * (e.g. `perf stat -e instructions:u ...`) and divide by the printed iteration
- * count. Workloads, timing rules and output grammar are specified in BENCH_SPEC.md.
+ * For a CPU-speed-independent figure on this host, run bench/run_callgrind.sh
+ * (instructions retired per op). Workloads, timing rules and output grammar are
+ * specified in BENCH_SPEC.md; the timed loop itself is Loop.java, shared with
+ * Bench.
  *
  * Run with:
  *   mvn -q compile exec:java -Dexec.mainClass=org.sofabuffers.sofab.bench.Perf
@@ -26,10 +29,9 @@
 package org.sofabuffers.sofab.bench;
 
 import java.io.IOException;
-import java.lang.management.ManagementFactory;
-import java.lang.management.ThreadMXBean;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Locale;
 
 import org.sofabuffers.sofab.ArrayKind;
 import org.sofabuffers.sofab.IStream;
@@ -41,19 +43,6 @@ public final class Perf {
     private Perf() {
     }
 
-    private static final ThreadMXBean THREADS = ManagementFactory.getThreadMXBean();
-    private static final double MIN_SECONDS = 1.0;
-
-    /**
-     * How long one batch of operations runs before the clock is read again.
-     * {@code getCurrentThreadCpuTime()} costs on the order of a microsecond,
-     * so reading it once per operation times the clock rather than the codec
-     * on cheap workloads — it lands in {@code CPU time/op} and MB/s alike.
-     * Ten milliseconds of work per read keeps the measurement under ~0.01%
-     * of a batch.
-     */
-    private static final double BATCH_SECONDS = 0.01;
-
     // --- message under test (identical to perf.c / perf.rs) ----------------
     private static final String PERF_STRING = "perf-benchmark-message";
     private static final int[] PERF_SAMPLES =
@@ -62,12 +51,7 @@ public final class Perf {
             {-100_000, -200_000, -300_000, -400_000, -500_000, -600_000, -700_000, -800_000};
     private static final double[] PERF_FP64 = {3.14159265, 6.28318530, 9.42477795, 12.56637060};
 
-    /** Thread CPU time in seconds (not wall-clock). */
-    private static double cpuNow() {
-        return THREADS.getCurrentThreadCpuTime() / 1e9;
-    }
-
-    private static int perfEncode(byte[] buf) throws IOException {
+    static int perfEncode(byte[] buf) throws IOException {
         OStream os = new OStream(buf);
         os.writeUnsigned(1, 0xDEAD_BEEFL);
         os.writeSigned(2, -12345);
@@ -124,124 +108,29 @@ public final class Perf {
         new IStream().feed(buf, 0, len, out);
     }
 
-    private static final class Result {
-        long iters;
-        double nsOp;
-        double mbS;
+    private static void report(String what, Loop.Result r, int bytes) {
+        System.out.printf(Locale.ROOT, "%n--- perf: %s ---%n", what);
+        System.out.printf(Locale.ROOT, "  iterations    : %d%n", r.iterations());
+        System.out.printf(Locale.ROOT, "  message size  : %d bytes%n", bytes);
+        System.out.printf(Locale.ROOT, "  cycles/op     : (hardware cycle counter unavailable on the JVM)%n");
+        System.out.printf(Locale.ROOT, "  CPU time/op   : %.1f ns  (thread CPU time, not wall-clock)%n",
+                r.nanosPerOp());
+        System.out.printf(Locale.ROOT, "  throughput    : %.1f MB/s  (speedtest, MB = 1e6 bytes)%n",
+                r.megabytesPerSecond(bytes));
     }
-
-    private static void report(String what, Result r, int bytes) {
-        System.out.printf("%n--- perf: %s ---%n", what);
-        System.out.printf("  iterations    : %d%n", r.iters);
-        System.out.printf("  message size  : %d bytes%n", bytes);
-        System.out.printf("  cycles/op     : (hardware cycle counter unavailable on the JVM)%n");
-        System.out.printf("  CPU time/op   : %.1f ns  (thread CPU time, not wall-clock)%n", r.nsOp);
-        System.out.printf("  throughput    : %.1f MB/s  (speedtest, MB = 1e6 bytes)%n", r.mbS);
-    }
-
-    private static Result measureEncode(byte[] buf) throws IOException {
-        long sink = 0;
-        // Warm up the JIT generously before timing.
-        for (int i = 0; i < 200_000; i++) {
-            sink += perfEncode(buf);
-        }
-        int msg = perfEncode(buf);
-
-        // Grow a batch until it spans BATCH_SECONDS, so the clock read that
-        // ends it is a rounding error against the work it timed.
-        long batch = 1;
-        for (;;) {
-            double c0 = cpuNow();
-            for (long k = 0; k < batch; k++) {
-                sink += perfEncode(buf);
-            }
-            if (cpuNow() - c0 >= BATCH_SECONDS) {
-                break;
-            }
-            batch *= 2;
-        }
-
-        long it = 0;
-        double t0 = cpuNow();
-        double el;
-        do {
-            for (long k = 0; k < batch; k++) {
-                sink += perfEncode(buf);
-            }
-            it += batch;
-            el = cpuNow() - t0;
-        } while (el < MIN_SECONDS);
-        BLACKHOLE = sink;
-
-        Result r = new Result();
-        r.iters = it;
-        r.nsOp = el / it * 1e9;
-        r.mbS = (double) msg * it / el / 1e6;
-        return r;
-    }
-
-    private static Result measureDecode(byte[] buf, int len) throws IOException {
-        long sink = 0;
-        for (int i = 0; i < 200_000; i++) {
-            PerfOut o = new PerfOut();
-            perfDecode(buf, len, o);
-            sink += o.acc;
-        }
-
-        // Grow a batch until it spans BATCH_SECONDS, so the clock read that
-        // ends it is a rounding error against the work it timed. The per-op
-        // PerfOut allocation stays inside the batch — it is part of the op.
-        long batch = 1;
-        for (;;) {
-            double c0 = cpuNow();
-            for (long k = 0; k < batch; k++) {
-                PerfOut o = new PerfOut();
-                perfDecode(buf, len, o);
-                sink += o.acc;
-            }
-            if (cpuNow() - c0 >= BATCH_SECONDS) {
-                break;
-            }
-            batch *= 2;
-        }
-
-        long it = 0;
-        double t0 = cpuNow();
-        double el;
-        do {
-            for (long k = 0; k < batch; k++) {
-                PerfOut o = new PerfOut();
-                perfDecode(buf, len, o);
-                sink += o.acc;
-            }
-            it += batch;
-            el = cpuNow() - t0;
-        } while (el < MIN_SECONDS);
-        BLACKHOLE = sink;
-
-        Result r = new Result();
-        r.iters = it;
-        r.nsOp = el / it * 1e9;
-        r.mbS = (double) len * it / el / 1e6;
-        return r;
-    }
-
-    /** Consumed after the loops so the JIT cannot elide the work. */
-    static long BLACKHOLE;
 
     public static void main(String[] args) throws IOException {
-        if (!THREADS.isCurrentThreadCpuTimeSupported()) {
+        if (!Loop.supported()) {
             System.err.println("perf: thread CPU time not supported on this JVM");
             return;
         }
-        THREADS.setThreadCpuTimeEnabled(true);
 
         byte[] buffer = new byte[512];
+        int msgSize = perfEncode(buffer);
 
         System.out.println("=== SofaBuffers Java per-op cost (cycles/op + throughput MB/s) ===");
 
-        Result enc = measureEncode(buffer);
-        int msgSize = perfEncode(buffer);
+        Loop.Result enc = Loop.run(() -> perfEncode(buffer));
         report("serialize (stream API)", enc, msgSize);
 
         // Self-check that the decode actually reproduced the data.
@@ -254,13 +143,19 @@ public final class Perf {
             System.exit(1);
         }
 
-        Result dec = measureDecode(buffer, msgSize);
+        // The per-op PerfOut allocation stays inside the body -- it is part of
+        // the op, as the decode destination is in any real caller.
+        Loop.Result dec = Loop.run(() -> {
+            PerfOut o = new PerfOut();
+            perfDecode(buffer, msgSize, o);
+            return o.acc;
+        });
         report("deserialize (stream API)", dec, msgSize);
 
         System.out.println();
         System.out.println("cycles/op tracks code cost; MB/s is this machine's throughput.");
-        if (BLACKHOLE == 42) {
-            System.out.print(""); // keep BLACKHOLE observably live
+        if (Loop.blackhole == 42) {
+            System.out.print(""); // keep the blackhole observably live
         }
     }
 }

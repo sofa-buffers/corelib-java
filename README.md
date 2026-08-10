@@ -361,8 +361,8 @@ suite.
 ## Benchmarks
 
 Three runnable tools mirror the other ports' `perf`, `bench` and
-`run_callgrind.sh` tooling — same workloads (a 1000-element `u64` array and a
-mixed message) and output format, so results are comparable across languages:
+`run_callgrind.sh` tooling — same workloads and output format, so results are
+comparable across languages:
 
 ```bash
 mvn -q compile exec:java -Dexec.mainClass=org.sofabuffers.sofab.bench.Perf   # per-op cost
@@ -370,15 +370,58 @@ mvn -q compile exec:java -Dexec.mainClass=org.sofabuffers.sofab.bench.Bench  # t
 bash bench/run_callgrind.sh                                                  # instructions/op
 ```
 
+The workload set is the family's, defined once in
+`src/main/java/org/sofabuffers/sofab/bench/Workloads.java` and driven by all three
+tools: a 1000-element `u64` array, a small mixed `typical` message, an unbounded
+**1 MB `blob`** encoded both one-shot and streamed through a 4096-byte buffer with
+a flush sink (and decoded from 4096-byte chunks), and a **`composite`** message
+holding what the flat datasets never reach — a wrapper array with a header per
+element, 320 bytes of non-ASCII UTF-8, nesting at depth 3, a field equal to its
+default that the encoder must *not* write, and a two-byte field header. The encoded
+sizes are cross-port parity checks: 170 bytes for the `perf` message, 1,000,005 for
+the blob and 956 for the composite.
+
 `Perf` reports thread-CPU-time ns/op (the JVM exposes no portable cycle counter; run
-under an external counter such as `perf stat -e instructions:u …` for a
-CPU-speed-independent number). `Bench` reports encode / decode throughput in MB/s
-over a ~1 s CPU-time loop. `bench/run_callgrind.sh` (needs `valgrind`, which the
-`.devcontainer/` image installs) reports
-**instructions retired per op** (Ir/op) under Callgrind — deterministic and
-independent of clock speed and scheduler, so the numbers compare across machines and
-against the sibling ports. There is no JIT-compiled `run_<workload>` symbol to toggle
-collection on, so — like the Python and TypeScript ports — it runs each workload at
-two rep counts and subtracts, which cancels JVM startup, class loading and JIT cost
-exactly. The exact workloads and output grammar are specified in
-the [SofaBuffers documentation](https://github.com/sofa-buffers/documentation).
+`bench/run_callgrind.sh` for a CPU-speed-independent number). `Bench` reports encode
+/ decode throughput in MB/s over a ~1 s CPU-time loop per workload.
+`bench/run_callgrind.sh` (needs `valgrind`, which the `.devcontainer/` image
+installs) reports **instructions retired per op** (Ir/op) under Callgrind —
+deterministic and independent of clock speed and scheduler, so the numbers compare
+across machines and against the sibling ports, and each workload gets a JVM of its
+own. There is no JIT-compiled `run_<workload>` symbol to toggle collection on, so —
+like the Python and TypeScript ports — it runs each workload at two rep counts and
+subtracts, which cancels JVM startup, class loading and JIT cost exactly (the warmup
+is fixed per workload and clears the pinned compile threshold, so what is subtracted
+is steady compiled code, not the interpreter).
+
+**Read the two `blob 1MB` encode rows against each other, not against the rest.**
+Five of that message's bytes are metadata and a million are payload, so its MB/s is
+this machine's memory bandwidth rather than a statement about the library — and the
+streamed row can even edge ahead of the one-shot one, because a 4 KiB window stays in
+L1 while a one-shot encode writes a megabyte out to memory. On this port the
+instruction counts must be read with the same care:
+
+```
+                              Ir/op        MB/s
+encode: blob 1MB one-shot   1,007,269   34,635.27
+encode: blob 1MB streaming    131,080   38,162.57
+```
+
+That eightfold gap is the JVM's array-copy strategy, not the flush path. The one-shot
+message's payload starts at offset 5 — its own header — and for a destination that is
+not 8-byte aligned the JIT's copy stub takes a path Callgrind counts at about one
+instruction per byte: a bare `System.arraycopy` of a megabyte on this JVM costs
+285,820 Ir to offset 0 and 1,001,143 Ir to offset 5. The streamed row copies into a
+fresh window at offset 0, 245 times, for 131,080 Ir — of which a bare 245 × 4096-byte
+copy is 88,012, so ~43,000 Ir/op, about 175 per flush, is what the divisible-run path
+actually costs here.
+
+One process, ten workloads: that costs the `decode: composite skip-all` row too.
+It shares a JVM with `decode: composite`, so the visitor call sites inside
+`IStream` see both sinks and neither row runs monomorphic — what not-decoding is
+worth shows up in Ir/op, where each workload gets its own JVM (8,885 against
+9,128), and not in the MB/s pair.
+
+The exact workloads, timing rules and output grammar are specified in
+the [SofaBuffers documentation](https://github.com/sofa-buffers/documentation);
+`BenchSpecTest` holds the tools to them.

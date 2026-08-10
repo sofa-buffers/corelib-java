@@ -22,8 +22,8 @@
 #
 #   -XX:-TieredCompilation -XX:-BackgroundCompilation -XX:CompileThreshold=2000
 #         one synchronous compile tier reached after 2000 invocations;
-#         Callgrind.java's fixed WARMUP (default 5000) drives the hot methods to
-#         C2 before the measured loop, so no tier transition happens during it.
+#         Callgrind.java's fixed warmup drives the hot methods to C2 before the
+#         measured loop, so no tier transition happens during it.
 #   -XX:+UseEpsilonGC -Xms/-Xmx equal
 #         no garbage collection and a fully-committed heap, so GC and heap
 #         growth add no variable instructions (the bounded run never fills it).
@@ -34,23 +34,44 @@
 # What survives the subtraction is a small, run-to-run-stable startup jitter
 # (~0.03% of a run's total); the measured rep delta per workload is chosen so
 # that jitter is <0.1% of the reported per-op number. Cheap ops (typical) use a
-# large delta; the 1000-element array ops carry a huge per-op signal already, so
-# a small delta keeps them fast without losing precision.
+# large delta; the 1000-element array and composite ops carry a big per-op signal
+# already, so a smaller delta keeps them fast without losing precision. The two
+# `blob 1MB` *encode* rows use a delta of two (BENCH_SPEC: R1=1, R2=3 is enough) —
+# a megabyte of copying per op is slow under Callgrind, and the subtraction cancels
+# fixed cost just as well at three reps as at three hundred.
+#
+# The two blob encode rows are read against each other rather than alone — with
+# the README's caveat for this port: the one-shot message's payload lands at
+# offset 5, and for a destination that is not 8-byte aligned the JIT's copy stub
+# takes a path Callgrind counts at ~1 Ir per byte, so their gap is the JVM's copy
+# strategy and not the flush machinery. What the flush path costs is the streamed
+# row's excess over a bare 245 × 4096-byte copy. `encode: blob 1MB passthrough` is
+# BENCH_SPEC's one optional row and is absent: this port implements no
+# pass-through, so the row is omitted rather than filled with a placeholder.
 #
 # Prereqs: valgrind, a JDK (with EpsilonGC — OpenJDK 11+), and Maven.
 # Usage:   bash bench/run_callgrind.sh
+#          WORKLOADS="encode_composite decode_composite" bash bench/run_callgrind.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 # Per-workload measured rep counts (R1 R2): cheap ops need a large delta so the
-# startup jitter is negligible; expensive array ops need only a small delta.
+# startup jitter is negligible; expensive ops need only a small one.
+#
+# `decode: blob 1MB` is deliberately *not* in the blob class. A decode hands the
+# visitor a window into the input and copies nothing, so its per-op cost is a walk
+# over 245 chunks — thousands of instructions, not the million the two encode rows
+# pay — and a delta of two ops would sit inside the run-to-run startup jitter and
+# can come out negative. It gets the ordinary delta, and is fast at it.
 REPS_CHEAP="${REPS_CHEAP:-10000 110000}"
 REPS_ARRAY="${REPS_ARRAY:-200 1200}"
+REPS_BLOB="${REPS_BLOB:-1 3}"
 reps_for() {
     case "$1" in
-        encode_u64_array|decode_u64_array) echo "$REPS_ARRAY";;
-        *)                                 echo "$REPS_CHEAP";;
+        encode_blob_oneshot|encode_blob_streaming) echo "$REPS_BLOB";;
+        *_u64_array|*_composite|*_composite_skip|decode_blob) echo "$REPS_ARRAY";;
+        *)                                        echo "$REPS_CHEAP";;
     esac
 }
 
@@ -73,7 +94,10 @@ JVM_FLAGS=(
 
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
-WORKLOADS=(encode_u64_array encode_typical decode_u64_array decode_typical)
+# Order follows BENCH_SPEC's table.
+WORKLOADS="${WORKLOADS:-encode_u64_array encode_typical encode_blob_oneshot \
+encode_blob_streaming encode_composite decode_u64_array decode_typical \
+decode_blob decode_composite decode_composite_skip}"
 
 run_cg() { # $1 workload, $2 reps, $3 tag
     valgrind --tool=callgrind --callgrind-out-file="$OUT/$3.out" \
@@ -86,10 +110,16 @@ bytes_of() { grep -ohE 'bytes=[0-9]+' "$OUT/$1.log" 2>/dev/null | head -1 | cut 
 
 label() {
     case "$1" in
-        encode_u64_array) echo "encode: u64 array (1000)";;
-        encode_typical)   echo "encode: typical message";;
-        decode_u64_array) echo "decode: u64 array (1000)";;
-        decode_typical)   echo "decode: typical message";;
+        encode_u64_array)      echo "encode: u64 array (1000)";;
+        encode_typical)        echo "encode: typical message";;
+        encode_blob_oneshot)   echo "encode: blob 1MB one-shot";;
+        encode_blob_streaming) echo "encode: blob 1MB streaming";;
+        encode_composite)      echo "encode: composite";;
+        decode_u64_array)      echo "decode: u64 array (1000)";;
+        decode_typical)        echo "decode: typical message";;
+        decode_blob)           echo "decode: blob 1MB";;
+        decode_composite)      echo "decode: composite";;
+        decode_composite_skip) echo "decode: composite skip-all";;
     esac
 }
 
@@ -102,7 +132,7 @@ echo "==========================================================================
 printf "%-26s %16s %9s\n" "Workload" "instr/op" "bytes"
 printf "%-26s %16s %9s\n" "--------" "--------" "-----"
 
-for w in "${WORKLOADS[@]}"; do
+for w in $WORKLOADS; do
     read -r r1 r2 <<<"$(reps_for "$w")"
     run_cg "$w" "$r1" "$w.lo"
     run_cg "$w" "$r2" "$w.hi"
@@ -115,3 +145,5 @@ done
 echo
 echo "Ir = instructions retired (Callgrind). Independent of CPU clock and OS"
 echo "scheduling; depends only on the executed code, so it compares across machines."
+echo "The blob 1MB rows are read against each other, with the README's caveat: this"
+echo "JVM's copy stub, not the flush path, is what separates one-shot from streaming."
