@@ -118,6 +118,21 @@ public final class OStream {
     private int offset;
     private final FlushSink sink;
 
+    /**
+     * Set by {@link #bufferSet}, read and cleared by the flush the call happened
+     * inside. CORELIB_PLAN §5.1: a sink that <b>takes</b> the buffer it was handed
+     * installs a replacement before returning, and writing then resumes at
+     * <em>that installation's</em> offset; a sink that returns without installing
+     * anything copied, and writing resumes at offset 0 in the still-active buffer.
+     * The encoder cannot tell the two apart by any other means, so this flag is
+     * what keeps a flush from overwriting the cursor an installation just set.
+     *
+     * <p>The offset belongs to the installation and is consumed by the flush it
+     * belongs to, so the flag is cleared at every handover: a {@code bufferSet}
+     * made outside a sink arms nothing for a later flush.
+     */
+    private boolean installed;
+
     /** Number of nested sequences currently open; bounded by {@link Sofab#MAX_DEPTH}. */
     private int depth;
 
@@ -202,14 +217,17 @@ public final class OStream {
      * Flush any pending bytes to the sink (if one is set) and report how many
      * bytes were pending. With no sink the buffer is left intact.
      *
+     * <p>This is a buffer handover like the automatic one: a sink that takes the
+     * buffer may install a replacement with {@link #bufferSet}, and writing then
+     * resumes at that installation's offset rather than at 0.
+     *
      * @return number of bytes that were pending
      * @throws IOException if the sink fails
      */
     public int flush() throws IOException {
         int used = offset;
         if (used > 0 && sink != null) {
-            sink.flush(buffer, 0, used);
-            offset = 0;
+            handOver(used);
         }
         return used;
     }
@@ -217,6 +235,15 @@ public final class OStream {
     /**
      * Replace the active buffer (typically from within a flush sink), resuming
      * writes at {@code offset} in the new buffer.
+     *
+     * <p>Called from within a {@link FlushSink} this is how a sink that <b>takes</b>
+     * the buffer it was handed hands the encoder a replacement (CORELIB_PLAN §5.1);
+     * a sink that returns without calling it copied, and writing resumes at 0 in
+     * the buffer that is still active. The start offset belongs to the
+     * installation, not to the buffer: passing the <b>same</b> array again is a new
+     * installation like any other, which is how a sink re-arms header room in every
+     * flushed unit. The offset is consumed by the flush it was installed in, so the
+     * next flush the sink returns from bare resumes at 0 again.
      *
      * @param buffer new caller-owned output buffer (length &gt; 0)
      * @param offset initial write position ({@code 0..buffer.length})
@@ -231,6 +258,7 @@ public final class OStream {
         this.buffer = buffer;
         this.end = buffer.length;
         this.offset = offset;
+        this.installed = true;
     }
 
     /**
@@ -265,17 +293,42 @@ public final class OStream {
         this.depth = 0;
         this.nPending = 0;
         this.pending0 = 0;
+        // bufferSet marks an installation; a reset is not one made from inside a
+        // flush, so it arms nothing for the next handover.
+        this.installed = false;
     }
 
     // --- primitives ---------------------------------------------------------
 
-    /** Hand the full buffer to the sink and resume at its start, or fail if none. */
+    /** Hand the full buffer to the sink and resume writing, or fail if there is none. */
     private void flushFull() throws IOException {
         if (sink == null) {
             throw new SofabException(SofabError.BUFFER_FULL);
         }
-        sink.flush(buffer, 0, offset);
-        offset = 0;
+        handOver(offset);
+        if (offset >= end) {
+            // The sink installed a buffer with no room left, and a write is in
+            // flight: report it here rather than let the caller loop forever
+            // copying zero bytes at a time.
+            throw new SofabException(SofabError.BUFFER_FULL);
+        }
+    }
+
+    /**
+     * Hand {@code used} buffered bytes to the sink and settle where writing goes
+     * next (CORELIB_PLAN §5.1): the offset of the replacement the sink installed if
+     * it took the buffer, or 0 in the still-active buffer if it copied. The flag is
+     * cleared first, so only an installation made from inside <em>this</em> call
+     * counts, and it is consumed here.
+     */
+    private void handOver(int used) throws IOException {
+        installed = false;
+        sink.flush(buffer, 0, used);
+        if (installed) {
+            installed = false;
+        } else {
+            offset = 0;
+        }
     }
 
     /** Append one byte, flushing the full buffer first if it has no room. */
