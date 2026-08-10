@@ -9,6 +9,7 @@ package org.sofabuffers.sofab;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.sofabuffers.sofab.common.Wire.bytes;
 
 import java.util.List;
 
@@ -16,14 +17,6 @@ import org.junit.jupiter.api.Test;
 import org.sofabuffers.sofab.common.RecordingVisitor;
 
 class IStreamTest {
-
-    private static byte[] bytes(int... values) {
-        byte[] out = new byte[values.length];
-        for (int i = 0; i < values.length; i++) {
-            out[i] = (byte) values[i];
-        }
-        return out;
-    }
 
     private static List<String> decode(byte[] data) throws SofabException {
         RecordingVisitor v = new RecordingVisitor();
@@ -97,21 +90,10 @@ class IStreamTest {
         assertEquals(decode(msg), decodeByteByByte(msg));
     }
 
-    // --- malformed input ----------------------------------------------------
-
-    @Test
-    void varintOverflowRejected() {
-        // 10 continuation bytes overflow the 64-bit value type.
-        byte[] bad = bytes(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80);
-        SofabException ex = assertThrows(SofabException.class, () -> decode(bad));
-        assertEquals(SofabError.INVALID_MSG, ex.error());
-    }
-
-    @Test
-    void danglingSequenceEndRejected() {
-        SofabException ex = assertThrows(SofabException.class, () -> decode(bytes(0x07)));
-        assertEquals(SofabError.INVALID_MSG, ex.error());
-    }
+    // --- edge cases at a field boundary -------------------------------------
+    //
+    // Malformed input is not asserted here: DecoderErrorsTest holds every
+    // rejection vector once and drives each through both decode surfaces.
 
     @Test
     void zeroLengthArrayAccepted() throws SofabException {
@@ -119,13 +101,6 @@ class IStreamTest {
         // arrayBegin fires once with count 0 and no element callbacks follow.
         assertEquals(List.of("arr:0:UNSIGNED:0"), decode(bytes(0x03, 0x00)));
         assertEquals(List.of("arr:0:UNSIGNED:0"), decodeByteByByte(bytes(0x03, 0x00)));
-    }
-
-    @Test
-    void badFp32LengthRejected() {
-        // fixlen header: id 0, fp32 subtype but length 5 (must be 4).
-        SofabException ex = assertThrows(SofabException.class, () -> decode(bytes(0x02, 0x28)));
-        assertEquals(SofabError.INVALID_MSG, ex.error());
     }
 
     // --- three-valued outcome (MESSAGE_SPEC §7): COMPLETE / INCOMPLETE / INVALID -
@@ -197,14 +172,8 @@ class IStreamTest {
         assertEquals(DecodeStatus.INCOMPLETE, statusOf(bytes(0x02, 0x2A, 0x48, 0x65, 0x6C)));
     }
 
-    @Test
-    void oversizeVarintIsInvalidNotIncomplete() {
-        // A varint longer than 64 bits is malformed regardless of what follows: it
-        // must throw INVALID_MSG, distinct from the non-throwing INCOMPLETE outcome.
-        byte[] bad = bytes(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80);
-        SofabException ex = assertThrows(SofabException.class, () -> statusOf(bad));
-        assertEquals(SofabError.INVALID_MSG, ex.error());
-    }
+    // The fourth outcome, INVALID, is not a status: it throws. Every vector that
+    // raises it lives in DecoderErrorsTest's table, asserted on both surfaces.
 
     @Test
     void statusIsAPureAccessor() throws SofabException {

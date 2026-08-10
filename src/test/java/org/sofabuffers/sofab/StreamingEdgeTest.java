@@ -7,6 +7,7 @@
 package org.sofabuffers.sofab;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.sofabuffers.sofab.common.Wire.bytes;
 
 import java.io.IOException;
 
@@ -14,14 +15,6 @@ import org.junit.jupiter.api.Test;
 import org.sofabuffers.sofab.common.RecordingVisitor;
 
 class StreamingEdgeTest {
-
-    private static byte[] bytes(int... values) {
-        byte[] out = new byte[values.length];
-        for (int i = 0; i < values.length; i++) {
-            out[i] = (byte) values[i];
-        }
-        return out;
-    }
 
     @Test
     void emptyStringEmitsOnce() throws SofabException {

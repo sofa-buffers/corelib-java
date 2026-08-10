@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.sofabuffers.sofab.common.Wire.bytes;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -65,14 +66,6 @@ class Utf8StrictTest {
         OStream os = new OStream(buf);
         body.run(os);
         return Arrays.copyOf(buf, os.bytesUsed());
-    }
-
-    private static byte[] bytes(int... values) {
-        byte[] out = new byte[values.length];
-        for (int i = 0; i < values.length; i++) {
-            out[i] = (byte) values[i];
-        }
-        return out;
     }
 
     private static byte[] hex(String s) {

@@ -31,6 +31,10 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.sofabuffers.sofab.common.Decode.CHUNKS;
+import static org.sofabuffers.sofab.common.Decode.verdict;
+import static org.sofabuffers.sofab.common.Wire.bytes;
+import static org.sofabuffers.sofab.common.Wire.concat;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -320,35 +324,10 @@ class FixlenArrayHeaderOrderTest {
     }
 
     // --- harness ------------------------------------------------------------
-
-    /** Whole-buffer (fast path), byte-at-a-time and 3-byte chunks (state machine). */
-    private static final int[] CHUNKS = { 0, 1, 3 };
-
-    /**
-     * Feed {@code data} to a fresh decoder in {@code chunk}-byte slices (0 = one
-     * whole feed, which takes the pointer-advancing fast path) and reduce the
-     * outcome to Crucible's three-valued verdict: {@code "A"} accept,
-     * {@code "I"} incomplete, {@code "R:<error>"} rejected.
-     */
-    private static String verdict(byte[] data, Visitor sink, int chunk) {
-        IStream in = new IStream();
-        try {
-            if (chunk <= 0) {
-                in.feed(data, sink);
-            } else {
-                for (int i = 0; i < data.length; i += chunk) {
-                    in.feed(data, i, Math.min(chunk, data.length - i), sink);
-                }
-            }
-        } catch (SofabException e) {
-            return "R:" + e.error();
-        } catch (UncheckedIOException e) {
-            // How sofabgen's Java backend aborts from a visitor callback, whose
-            // signature declares no checked exception.
-            return "R:" + ((SofabException) e.getCause()).error();
-        }
-        return in.status() == DecodeStatus.COMPLETE ? "A" : "I";
-    }
+    //
+    // The rows above are read through Decode.verdict at Decode.CHUNKS: whole
+    // buffer (the fast path), byte-at-a-time and 3-byte chunks (the state
+    // machine).
 
     @Test
     void harnessReportsAnUnrelatedRejectionUnchanged() {
@@ -474,27 +453,5 @@ class FixlenArrayHeaderOrderTest {
         private static UncheckedIOException invalid(String detail) {
             return new UncheckedIOException(new SofabException(SofabError.INVALID_MSG, detail));
         }
-    }
-
-    private static byte[] bytes(int... values) {
-        byte[] out = new byte[values.length];
-        for (int i = 0; i < values.length; i++) {
-            out[i] = (byte) values[i];
-        }
-        return out;
-    }
-
-    private static byte[] concat(byte[]... parts) {
-        int n = 0;
-        for (byte[] p : parts) {
-            n += p.length;
-        }
-        byte[] out = new byte[n];
-        int at = 0;
-        for (byte[] p : parts) {
-            System.arraycopy(p, 0, out, at, p.length);
-            at += p.length;
-        }
-        return out;
     }
 }

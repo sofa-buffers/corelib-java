@@ -9,6 +9,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.sofabuffers.sofab.common.Decode.errorOf;
+import static org.sofabuffers.sofab.common.Decode.errorOfChunked;
+import static org.sofabuffers.sofab.common.Wire.bytes;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
@@ -36,32 +39,6 @@ import org.sofabuffers.sofab.common.RecordingVisitor;
  * element, one-shot and byte-at-a-time — so the fold cannot be undone unnoticed.
  */
 class NoDeadCodeTest {
-
-    private static byte[] bytes(int... values) {
-        byte[] out = new byte[values.length];
-        for (int i = 0; i < values.length; i++) {
-            out[i] = (byte) values[i];
-        }
-        return out;
-    }
-
-    private static SofabError errorOf(byte[] data) {
-        SofabException ex = assertThrows(SofabException.class,
-                () -> new IStream().feed(data, new Visitor() { }));
-        return ex.error();
-    }
-
-    /** Feed {@code data} one byte at a time, so the resumable machine reads it. */
-    private static SofabError errorOfChunked(byte[] data) {
-        SofabException ex = assertThrows(SofabException.class, () -> {
-            IStream in = new IStream();
-            Visitor v = new Visitor() { };
-            for (byte b : data) {
-                in.feed(new byte[] { b }, v);
-            }
-        });
-        return ex.error();
-    }
 
     // --- public surface -----------------------------------------------------
 

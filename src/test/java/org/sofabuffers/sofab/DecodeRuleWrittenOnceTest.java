@@ -8,6 +8,8 @@ package org.sofabuffers.sofab;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.sofabuffers.sofab.common.Wire.bytes;
+import static org.sofabuffers.sofab.common.Wire.concat;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
@@ -214,14 +216,6 @@ class DecodeRuleWrittenOnceTest {
         return (length << 3) | subtype;
     }
 
-    private static byte[] bytes(int... values) {
-        byte[] out = new byte[values.length];
-        for (int i = 0; i < values.length; i++) {
-            out[i] = (byte) values[i];
-        }
-        return out;
-    }
-
     private static byte[] varint(long value) {
         byte[] out = new byte[10];
         int n = 0;
@@ -237,12 +231,6 @@ class DecodeRuleWrittenOnceTest {
             }
         }
         return Arrays.copyOf(out, n);
-    }
-
-    private static byte[] concat(byte[] a, byte[] b) {
-        byte[] out = Arrays.copyOf(a, a.length + b.length);
-        System.arraycopy(b, 0, out, a.length, b.length);
-        return out;
     }
 
     /**
