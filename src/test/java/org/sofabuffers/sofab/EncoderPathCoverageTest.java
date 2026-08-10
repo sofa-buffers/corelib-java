@@ -214,11 +214,181 @@ class EncoderPathCoverageTest {
     }
 
     @Test
-    void shortArrayStaysOnStreamingPath() throws IOException {
-        // Below BULK_MIN elements the bulk branch is skipped even with room to
-        // spare; the output is still identical.
+    void shortArrayTakesTheSamePathsAsALongOne() throws IOException {
+        // A three-element array is bulk-encoded like any other once the room test
+        // passes — there is no element-count floor — and identical either way.
         long[] few = { 1L, -1L, 0x4000L };
         assertBulkMatchesStreamed(os -> os.writeArrayUnsigned(5, few));
+    }
+
+    // --- the per-type bulk room bound ---------------------------------------
+
+    /**
+     * Each integer array writer enters the check-free bulk loop on its <em>own</em>
+     * element width — two bytes for a {@code byte}, three for a {@code short}, five
+     * for an {@code int}, ten for a {@code long} — plus a full varint's room for the
+     * last element, because {@link OStream} assembles a varint with an eight-byte
+     * store that must stay inside the buffer.
+     *
+     * <p>Sweeping the buffer size across that threshold is what tests it: below it
+     * the per-element streaming loop runs, at and above it the bulk loop does, and a
+     * width bound that under-estimated its type would run the eight-byte store past
+     * the end of an exactly-sized buffer rather than quietly producing other bytes.
+     * Every element here is its type's widest encoding.
+     */
+    private static void assertSameBytesAcrossTheBulkThreshold(EncodeBody body)
+            throws IOException {
+        byte[] want = encode(body);
+        for (int size = want.length; size <= want.length + 24; size++) {
+            byte[] buf = new byte[size];
+            OStream os = new OStream(buf);
+            body.run(os);
+            assertArrayEquals(want, Arrays.copyOf(buf, os.bytesUsed()),
+                    "buffer of " + size + " bytes produced different output");
+        }
+        assertArrayEquals(want, encodeStreamed(16, body));
+    }
+
+    private static byte[] widestBytes() {
+        byte[] a = new byte[24];
+        Arrays.fill(a, (byte) 0xFF);
+        return a;
+    }
+
+    private static short[] widestShorts() {
+        short[] a = new short[24];
+        Arrays.fill(a, (short) 0xFFFF);
+        return a;
+    }
+
+    private static int[] widestInts() {
+        int[] a = new int[24];
+        Arrays.fill(a, -1);
+        return a;
+    }
+
+    private static long[] widestLongs() {
+        long[] a = new long[24];
+        Arrays.fill(a, -1L);
+        return a;
+    }
+
+    @Test
+    void unsignedByteArrayBulkBoundIsExact() throws IOException {
+        assertSameBytesAcrossTheBulkThreshold(os -> os.writeArrayUnsigned(1, widestBytes()));
+    }
+
+    @Test
+    void unsignedShortArrayBulkBoundIsExact() throws IOException {
+        assertSameBytesAcrossTheBulkThreshold(os -> os.writeArrayUnsigned(2, widestShorts()));
+    }
+
+    @Test
+    void unsignedIntArrayBulkBoundIsExact() throws IOException {
+        assertSameBytesAcrossTheBulkThreshold(os -> os.writeArrayUnsigned(3, widestInts()));
+    }
+
+    @Test
+    void unsignedLongArrayBulkBoundIsExact() throws IOException {
+        assertSameBytesAcrossTheBulkThreshold(os -> os.writeArrayUnsigned(4, widestLongs()));
+    }
+
+    @Test
+    void signedByteArrayBulkBoundIsExact() throws IOException {
+        byte[] a = new byte[24];
+        Arrays.fill(a, Byte.MIN_VALUE);
+        assertSameBytesAcrossTheBulkThreshold(os -> os.writeArraySigned(5, a));
+    }
+
+    @Test
+    void signedShortArrayBulkBoundIsExact() throws IOException {
+        short[] a = new short[24];
+        Arrays.fill(a, Short.MIN_VALUE);
+        assertSameBytesAcrossTheBulkThreshold(os -> os.writeArraySigned(6, a));
+    }
+
+    @Test
+    void signedIntArrayBulkBoundIsExact() throws IOException {
+        int[] a = new int[24];
+        Arrays.fill(a, Integer.MIN_VALUE);
+        assertSameBytesAcrossTheBulkThreshold(os -> os.writeArraySigned(7, a));
+    }
+
+    @Test
+    void signedLongArrayBulkBoundIsExact() throws IOException {
+        long[] a = new long[24];
+        Arrays.fill(a, Long.MIN_VALUE);
+        assertSameBytesAcrossTheBulkThreshold(os -> os.writeArraySigned(8, a));
+    }
+
+    @Test
+    void emptyIntegerArraysNeverEnterTheBulkLoop() throws IOException {
+        // count == 0: no element is written, so no room beyond the header is
+        // needed and the encoder must not demand a varint's worth of it.
+        assertArrayEquals(bytes(0x0B, 0x00), encode(os -> os.writeArrayUnsigned(1, new byte[0])));
+        assertArrayEquals(bytes(0x0B, 0x00), encode(os -> os.writeArrayUnsigned(1, new short[0])));
+        assertArrayEquals(bytes(0x0B, 0x00), encode(os -> os.writeArrayUnsigned(1, new int[0])));
+        assertArrayEquals(bytes(0x0B, 0x00), encode(os -> os.writeArrayUnsigned(1, new long[0])));
+        assertArrayEquals(bytes(0x0C, 0x00), encode(os -> os.writeArraySigned(1, new byte[0])));
+        assertArrayEquals(bytes(0x0C, 0x00), encode(os -> os.writeArraySigned(1, new short[0])));
+        assertArrayEquals(bytes(0x0C, 0x00), encode(os -> os.writeArraySigned(1, new int[0])));
+        assertArrayEquals(bytes(0x0C, 0x00), encode(os -> os.writeArraySigned(1, new long[0])));
+    }
+
+    @Test
+    void narrowIntegerArraysRoundTrip() throws IOException {
+        byte[] wire = encode(os -> {
+            os.writeArrayUnsigned(1, widestBytes());
+            os.writeArrayUnsigned(2, widestShorts());
+        });
+
+        RecordingVisitor v = new RecordingVisitor();
+        new IStream().feed(wire, v);
+
+        assertEquals("arr:1:UNSIGNED:24", v.events.get(0));
+        assertEquals("u:1=255", v.events.get(1));
+        assertEquals("arr:2:UNSIGNED:24", v.events.get(25));
+        assertEquals("u:2=65535", v.events.get(26));
+    }
+
+    // --- the packed field / float stores -------------------------------------
+
+    /**
+     * A one-byte header with a one-byte value goes out as a single two-byte store,
+     * and an fp32 field as a single eight-byte one; both fall back to the general
+     * varint path once the id no longer fits one byte. The two arms must agree with
+     * each other and with the buffer-spanning writer, which has neither.
+     */
+    @Test
+    void packedFieldStoresAgreeWithTheGeneralPath() throws IOException {
+        for (int id : new int[] { 0, 1, 15, 16, 31, 1000, 0x10_0000 }) {
+            final int fieldId = id;
+            for (long value : new long[] { 0L, 1L, 0x7FL, 0x80L, -1L }) {
+                final long v = value;
+                assertBulkMatchesStreamed(os -> os.writeUnsigned(fieldId, v));
+                assertBulkMatchesStreamed(os -> os.writeSigned(fieldId, v));
+            }
+            assertBulkMatchesStreamed(os -> os.writeFp32(fieldId, 3.5f));
+            assertBulkMatchesStreamed(os -> os.writeFp64(fieldId, -2.25));
+            assertBulkMatchesStreamed(os -> os.writeFp32(fieldId, Float.NEGATIVE_INFINITY));
+            assertBulkMatchesStreamed(os -> os.writeFp64(fieldId, Double.NaN));
+        }
+    }
+
+    @Test
+    void packedFloatFieldsRoundTrip() throws IOException {
+        byte[] wire = encode(os -> {
+            os.writeFp32(3, 3.5f);
+            os.writeFp64(4, -2.25);
+            os.writeFp32(4096, 1.5f);
+            os.writeFp64(4096, 0.5);
+        });
+
+        RecordingVisitor v = new RecordingVisitor();
+        new IStream().feed(wire, v);
+
+        assertEquals(Arrays.asList(
+                "f32:3=3.5", "f64:4=-2.25", "f32:4096=1.5", "f64:4096=0.5"), v.events);
     }
 
     @Test
