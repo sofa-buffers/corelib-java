@@ -23,10 +23,12 @@ package org.sofabuffers.sofab;
  *       (varint over 64 bits, bad type/subtype tag, length/count/id over max,
  *       dangling sequence-end, nesting past {@code MAX_DEPTH}, invalid UTF-8).
  *       Malformed input surfaces as a thrown
- *       {@link SofabException} carrying {@link SofabError#INVALID_MSG}; this
- *       constant names that outcome for completeness of the three-valued model.
- *       {@link IStream#status()} therefore only ever returns {@link #COMPLETE}
- *       or {@link #INCOMPLETE}.</li>
+ *       {@link SofabException} carrying {@link SofabError#INVALID_MSG}, and the
+ *       decoder latches it: {@link IStream#status()} returns this constant from
+ *       then on. It outranks the other two — input that is both malformed and
+ *       truncated is {@code INVALID}, never {@code INCOMPLETE} — and it is
+ *       <b>terminal</b>: no further bytes can revise it, only
+ *       {@link IStream#reset()} starting a new message.</li>
  * </ul>
  */
 public enum DecodeStatus {
@@ -41,8 +43,9 @@ public enum DecodeStatus {
 
     /**
      * The bytes are malformed regardless of what follows. Surfaced as a thrown
-     * {@link SofabException} with {@link SofabError#INVALID_MSG}; never returned
-     * by {@link IStream#status()}.
+     * {@link SofabException} with {@link SofabError#INVALID_MSG} and then latched:
+     * {@link IStream#status()} reports it until {@link IStream#reset()}, and no
+     * continuation can change it back.
      */
     INVALID,
 }
