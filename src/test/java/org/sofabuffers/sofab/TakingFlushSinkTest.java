@@ -198,18 +198,20 @@ class TakingFlushSinkTest {
     /**
      * A replacement with no room left is a caller error, not a livelock: honouring
      * the installed offset means the encoder can be handed a buffer it cannot write
-     * a single byte into, and it has to say so.
+     * a single byte into, and it has to say so. Since the stream carries a sink,
+     * {@link Sofab#MIN_OUTPUT_BUFFER} binds the installation (CORELIB_PLAN §5.1) and
+     * the rejection lands <b>in the {@code bufferSet} call</b> — where the buffer is
+     * handed over — rather than at some later write.
      */
     @Test
-    void installingAFullyReservedBufferReportsBufferFull() {
+    void installingAFullyReservedBufferIsRejectedAtTheHandover() {
         OStream[] self = new OStream[1];
         FlushSink noRoom = (data, off, len) -> self[0].bufferSet(freshBuffer(16), 16);
 
         OStream os = new OStream(freshBuffer(16), 0, noRoom);
         self[0] = os;
 
-        SofabException e = assertThrows(SofabException.class, () -> message(os));
-        assertEquals(SofabError.BUFFER_FULL, e.error());
+        assertThrows(IllegalArgumentException.class, () -> message(os));
     }
 
     /**

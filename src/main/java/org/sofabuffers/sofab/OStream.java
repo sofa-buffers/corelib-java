@@ -34,6 +34,11 @@ import static org.sofabuffers.sofab.WireFormat.zigzagEncode;
  * <p>An initial {@code offset} reserves space at the front of the buffer for a
  * lower-layer protocol header, avoiding a copy.
  *
+ * <p>A buffer installed <b>with</b> a sink must leave at least
+ * {@link Sofab#MIN_OUTPUT_BUFFER} usable bytes and is rejected where it is handed
+ * over if it does not; a buffer installed without one is subject to no minimum
+ * (CORELIB_PLAN §5.1).
+ *
  * <p>Writes take a fast path that advances a cursor over the buffer with no
  * per-byte bounds check whenever the remaining room is known to be sufficient
  * (a varint is at most ten bytes; a float four or eight); a buffer-spanning slow
@@ -187,21 +192,48 @@ public final class OStream {
      * accumulated bytes are passed to {@code sink} and writing resumes at the
      * start of the buffer.
      *
+     * <p>With a sink the buffer must leave at least {@link Sofab#MIN_OUTPUT_BUFFER}
+     * usable bytes — {@code buffer.length - offset} — and is rejected here if it
+     * does not (CORELIB_PLAN §5.1).
+     *
      * @param buffer caller-owned output buffer (length &gt; 0)
      * @param offset initial write position ({@code 0..buffer.length})
      * @param sink   flush sink, or {@code null} for none
+     * @throws IllegalArgumentException if the buffer is empty, the offset is out of
+     *                                  range, or a sink is given and the buffer
+     *                                  leaves less than {@link Sofab#MIN_OUTPUT_BUFFER}
+     *                                  usable bytes
      */
     public OStream(byte[] buffer, int offset, FlushSink sink) {
+        checkHandover(buffer, offset, sink);
+        this.buffer = buffer;
+        this.end = buffer.length;
+        this.offset = offset;
+        this.sink = sink;
+    }
+
+    /**
+     * Validate a buffer where it is handed over — at construction and at every
+     * mid-stream {@link #bufferSet} — so a buffer that cannot be written into is
+     * refused there rather than partway through a message (CORELIB_PLAN §5.1).
+     *
+     * <p>{@link Sofab#MIN_OUTPUT_BUFFER} applies only when a {@code sink} is
+     * present. Without one no flush can occur, so §5.1 imposes no minimum: the
+     * buffer either holds the message or reports {@link SofabError#BUFFER_FULL},
+     * and a caller sizing from the generated {@code MAX_SIZE} keeps an exact fit.
+     */
+    private static void checkHandover(byte[] buffer, int offset, FlushSink sink) {
         if (buffer == null || buffer.length == 0) {
             throw new IllegalArgumentException("buffer must be non-empty");
         }
         if (offset < 0 || offset > buffer.length) {
             throw new IllegalArgumentException("offset out of range");
         }
-        this.buffer = buffer;
-        this.end = buffer.length;
-        this.offset = offset;
-        this.sink = sink;
+        if (sink != null && buffer.length - offset < Sofab.MIN_OUTPUT_BUFFER) {
+            throw new IllegalArgumentException(
+                    "streaming buffer leaves " + (buffer.length - offset)
+                            + " usable bytes, minimum is " + Sofab.MIN_OUTPUT_BUFFER);
+        }
     }
 
     /**
@@ -245,16 +277,21 @@ public final class OStream {
      * flushed unit. The offset is consumed by the flush it was installed in, so the
      * next flush the sink returns from bare resumes at 0 again.
      *
+     * <p>On a stream that carries a sink the replacement must leave at least
+     * {@link Sofab#MIN_OUTPUT_BUFFER} usable bytes — {@code buffer.length - offset}
+     * — and is rejected here if it does not, which is why a sink cannot hand back
+     * storage the encoder could not write a single byte into (CORELIB_PLAN §5.1).
+     * On a sink-less stream no minimum applies.
+     *
      * @param buffer new caller-owned output buffer (length &gt; 0)
      * @param offset initial write position ({@code 0..buffer.length})
+     * @throws IllegalArgumentException if the buffer is empty, the offset is out of
+     *                                  range, or this stream carries a sink and the
+     *                                  buffer leaves less than
+     *                                  {@link Sofab#MIN_OUTPUT_BUFFER} usable bytes
      */
     public void bufferSet(byte[] buffer, int offset) {
-        if (buffer == null || buffer.length == 0) {
-            throw new IllegalArgumentException("buffer must be non-empty");
-        }
-        if (offset < 0 || offset > buffer.length) {
-            throw new IllegalArgumentException("offset out of range");
-        }
+        checkHandover(buffer, offset, this.sink);
         this.buffer = buffer;
         this.end = buffer.length;
         this.offset = offset;

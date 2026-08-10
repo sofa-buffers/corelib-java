@@ -39,6 +39,25 @@ public final class Sofab {
     public static final long ARRAY_MAX = Integer.MAX_VALUE;
 
     /**
+     * Smallest output buffer this port accepts <b>for streaming</b> (CORELIB_PLAN
+     * §5.1). It is {@code 1}: the encoder splits every atomic unit, so no write has
+     * to land contiguously and a single usable byte is enough.
+     *
+     * <p><b>It binds a buffer installed with a {@link FlushSink}</b> — at
+     * construction and at every mid-stream {@link OStream#bufferSet}, both of which
+     * reject {@code buffer.length - offset < MIN_OUTPUT_BUFFER} with
+     * {@link IllegalArgumentException} where the buffer is handed over, never
+     * partway through a message. A buffer installed <em>without</em> a sink is
+     * subject to no minimum: no flush can occur there, so a caller sizing from the
+     * generated {@code MAX_SIZE} keeps an exact fit.
+     *
+     * <p>Any size at or above this produces output <b>byte-identical</b> to the
+     * one-shot path, so sizing a streaming buffer from this constant trades nothing
+     * but flush frequency.
+     */
+    public static final int MIN_OUTPUT_BUFFER = 1;
+
+    /**
      * Maximum nested-sequence depth (§4.9 / §6.2). An encoder must not open more
      * than {@code MAX_DEPTH} nested sequences, and a decoder rejects a message that
      * nests deeper with {@link SofabError#INVALID_MSG}, bounding recursion / stack
