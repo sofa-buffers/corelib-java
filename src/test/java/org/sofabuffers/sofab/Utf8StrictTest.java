@@ -26,9 +26,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -223,6 +225,82 @@ class Utf8StrictTest {
                 assertThrows(CharacterCodingException.class,
                         () -> strictDecoder().decode(ByteBuffer.wrap(payload)),
                         name + ": strict decoder must reject invalid UTF-8");
+            }));
+        }
+        assertTrue(tests.size() >= 11, "expected the shared invalid_utf8 vectors");
+        return tests;
+    }
+
+    /**
+     * A strict string sink, exactly as generated code builds one: it accumulates
+     * the chunks of the string field and materializes it with the REPORTing
+     * decoder once the declared payload is complete — a multi-byte sequence merely
+     * split at a chunk boundary is INCOMPLETE, not INVALID — raising INVALID_MSG
+     * wrapped in an {@link UncheckedIOException}, since {@link Visitor} declares no
+     * checked exception.
+     */
+    private static final class StrictStringSink implements Visitor {
+        private final ByteArrayOutputStream buf = new ByteArrayOutputStream();
+
+        @Override
+        public void string(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
+            buf.write(data, chunkOffset, chunkLength);
+            if (offset + chunkLength < total) {
+                return; // payload still arriving
+            }
+            byte[] payload = buf.toByteArray();
+            buf.reset();
+            try {
+                strictDecoder().decode(ByteBuffer.wrap(payload));
+            } catch (CharacterCodingException e) {
+                throw new UncheckedIOException(
+                        new SofabException(SofabError.INVALID_MSG, "string is not valid UTF-8"));
+            }
+        }
+    }
+
+    /**
+     * The vectors' {@code decode_outcome: "invalid"} is a statement about the whole
+     * message, so assert it where the outcome actually lives: feed
+     * {@code serialized_hex} to an {@link IStream} driving the strict sink above
+     * and read the decoder's verdict. It must be {@link DecodeStatus#INVALID}, and
+     * terminal — a further feed of a well-formed field decodes nothing and cannot
+     * restore {@code COMPLETE} (corelib-java#71). Checked whole and one byte at a
+     * time: the verdict must not depend on how the payload was chunked.
+     */
+    @TestFactory
+    List<DynamicTest> invalidUtf8DecodeOutcomeIsInvalidAndTerminal() {
+        List<DynamicTest> tests = new ArrayList<>();
+        for (JsonElement ve : loadInvalidUtf8()) {
+            JsonObject v = ve.getAsJsonObject();
+            String name = v.get("name").getAsString();
+            byte[] wire = hex(v.get("serialized_hex").getAsString());
+            tests.add(DynamicTest.dynamicTest("decode-outcome:" + name, () -> {
+                assertEquals("invalid", v.get("decode_outcome").getAsString());
+                for (int chunk : new int[] {wire.length, 1}) {
+                    IStream is = new IStream();
+                    StrictStringSink sink = new StrictStringSink();
+                    assertThrows(UncheckedIOException.class, () -> {
+                        for (int i = 0; i < wire.length; i += chunk) {
+                            is.feed(wire, i, Math.min(chunk, wire.length - i), sink);
+                        }
+                    }, name + ": strict decode must reject the message");
+                    assertEquals(DecodeStatus.INVALID, is.status(),
+                            name + ": the decode outcome is INVALID (chunk " + chunk + ")");
+
+                    // Terminal: well-formed bytes fed afterwards change nothing.
+                    List<String> events = new ArrayList<>();
+                    Visitor record = new Visitor() {
+                        @Override
+                        public void unsigned(int id, long value) {
+                            events.add(id + "=" + value);
+                        }
+                    };
+                    assertThrows(SofabException.class,
+                            () -> is.feed(new byte[] {0x08, 0x01}, record));
+                    assertEquals(List.of(), events);
+                    assertEquals(DecodeStatus.INVALID, is.status());
+                }
             }));
         }
         assertTrue(tests.size() >= 11, "expected the shared invalid_utf8 vectors");
