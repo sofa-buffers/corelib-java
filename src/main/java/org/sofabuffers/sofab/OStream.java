@@ -695,9 +695,56 @@ public final class OStream {
         // Encode UTF-8 straight into the output buffer instead of allocating an
         // intermediate byte[] per call (String.getBytes). One pass measures the
         // byte length for the fixlen header, the second emits the bytes.
-        int n = utf8Length(text);
+        //
+        // An ALL-ASCII string gets the second pass nearly for free. The measuring
+        // pass has to look for the first non-ASCII char anyway; when there is none,
+        // the byte length IS the char count and every byte is that char, so the
+        // payload is a BULK COPY of the string's own storage instead of a
+        // char-at-a-time loop. String.getBytes(int,int,byte[],int) writes exactly
+        // those low bytes, and for a Latin-1-coded String -- which an all-ASCII one
+        // always is -- that is a System.arraycopy. Identifiers, codes, field names,
+        // most of what a schema carries, take this path.
+        //
+        // Length-gated because the copy is a call with its own bounds checks: below
+        // ASCII_BULK_MIN the char loop is already fewer instructions than setting
+        // one up. Room-gated because the bulk copy cannot flush mid-string, and the
+        // room is read AFTER the header: writing it runs beginField, which may
+        // commit held-back sequence headers and flush, so the offset before it is
+        // not the offset the payload starts at. A string that does not fit falls
+        // through to writeUtf8, which is what this path replaces and handles both
+        // the in-room loop and the buffer-spanning one.
+        int ascii = asciiPrefix(text);
+        int len = text.length();
+        if (ascii == len) {
+            writeIdTypeValue(id, T_FIXLEN, ((long) len << 3) | FixlenType.STRING.raw());
+            if (len >= ASCII_BULK_MIN && end - offset >= len) {
+                text.getBytes(0, len, buffer, offset);
+                offset += len;
+            } else {
+                writeUtf8(text, len);
+            }
+            return;
+        }
+        int n = utf8Length(text, ascii);
         writeIdTypeValue(id, T_FIXLEN, ((long) n << 3) | FixlenType.STRING.raw());
         writeUtf8(text, n);
+    }
+
+    /**
+     * Shortest string the ASCII bulk copy in {@link #writeString} is used for.
+     * Below it the char-at-a-time loop is cheaper than the copy's call and bounds
+     * checks; the exact crossover is not sharp, and this sits comfortably past it.
+     */
+    private static final int ASCII_BULK_MIN = 16;
+
+    /** Index of the first char at or above {@code U+0080}, or the length if none. */
+    private static int asciiPrefix(String s) {
+        int len = s.length();
+        int i = 0;
+        while (i < len && s.charAt(i) < 0x80) {
+            i++;
+        }
+        return i;
     }
 
     /**
@@ -708,15 +755,14 @@ public final class OStream {
      * before {@link #writeString} emits any bytes means an invalid string is
      * rejected without producing partial wire output.
      *
+     * <p>{@code from} is the caller's already-scanned ASCII prefix length (see
+     * {@link #asciiPrefix}); those chars are one byte each and are not re-examined.
+     *
      * @throws SofabException with {@link SofabError#ARGUMENT} on an unpaired surrogate
      */
-    private static int utf8Length(String s) throws SofabException {
+    private static int utf8Length(String s, int from) throws SofabException {
         int len = s.length();
-        // ASCII prefix scan: one compare per char, no per-char byte accounting.
-        int i = 0;
-        while (i < len && s.charAt(i) < 0x80) {
-            i++;
-        }
+        int i = from;
         int bytes = i;
         for (; i < len; i++) {
             char c = s.charAt(i);
