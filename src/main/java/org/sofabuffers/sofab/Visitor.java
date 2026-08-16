@@ -158,6 +158,52 @@ public interface Visitor {
     default void arrayBegin(int id, ArrayKind kind, int count) {
     }
 
+    /**
+     * Offer to take an <b>integer</b> array's elements in bulk instead of one call
+     * at a time. Asked once per array, immediately after {@link #arrayBegin} and
+     * before any element, for {@link ArrayKind#UNSIGNED} and
+     * {@link ArrayKind#SIGNED} arrays with at least one element.
+     *
+     * <p>Return an array of <b>at least {@code count}</b> longs and the decoder
+     * writes the elements straight into {@code [0, count)} — already ZigZag-decoded
+     * for a signed array, exactly the values {@link #signed} would have delivered —
+     * with no per-element callback at all, then calls {@link #arrayBulkEnd}. Return
+     * {@code null}, the default, and the elements arrive through {@link #unsigned}
+     * / {@link #signed} as before. A shorter array than {@code count} is treated as
+     * {@code null}, so a miscounted destination cannot overrun.
+     *
+     * <p>This exists because {@code count} is the one thing the consumer is told
+     * before the elements arrive: a destination sized from it needs no per-element
+     * routing, bounds growth or dispatch, and those are the whole cost of a short
+     * array. It is a fast path, not a contract change — a visitor that never
+     * overrides it decodes identically.
+     *
+     * <p><b>{@code count} is untrusted.</b> It is the wire's claim, bounded only by
+     * the format ceiling. Return {@code null} unless the array's length is already
+     * bounded by something the consumer trusts (a schema {@code count}), or an
+     * oversized claim becomes an up-front allocation.
+     *
+     * @param id    field id
+     * @param kind  {@link ArrayKind#UNSIGNED} or {@link ArrayKind#SIGNED}
+     * @param count number of elements the wire announced
+     * @return destination of at least {@code count} longs, or null for per-element
+     */
+    default long[] arrayBulk(int id, ArrayKind kind, int count) {
+        return null;
+    }
+
+    /**
+     * The bulk fill offered at {@link #arrayBulk} is complete: {@code n} elements
+     * were written into the destination. Called exactly once per accepted offer,
+     * after the last element and before any following field. A truncated message
+     * never reaches it — the array did not end.
+     *
+     * @param id field id
+     * @param n  number of elements written (the announced count)
+     */
+    default void arrayBulkEnd(int id, int n) {
+    }
+
     /** Start of a nested sequence (a new id scope).
      *
      * @param id field id of the sequence

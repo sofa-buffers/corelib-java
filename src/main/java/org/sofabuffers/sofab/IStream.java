@@ -187,6 +187,16 @@ public final class IStream {
     private byte[] acc;
     private int accLen;
 
+    /**
+     * Destination of an accepted {@link Visitor#arrayBulk} offer, or null when the
+     * elements go through the per-element callbacks. Non-null only between the
+     * offer and {@link Visitor#arrayBulkEnd}, so it also survives a feed boundary
+     * inside the array: both the bulk element loops and the resumable machine write
+     * through it, and {@link #bulkAt} counts what has been written so far.
+     */
+    private long[] bulk;
+    private int bulkAt;
+
     // sequence nesting depth (for balanced start/end validation)
     private long depth;
 
@@ -251,6 +261,8 @@ public final class IStream {
         fixlenTotal = 0;
         fixlenRemaining = 0;
         accLen = 0;
+        bulk = null;
+        bulkAt = 0;
         depth = 0;
         invalid = false;
         machineBytes = 0;
@@ -850,6 +862,8 @@ public final class IStream {
         // from memory each time would add a load/store to every element.
         int remaining = arrayRemaining;
         final int fieldId = id;
+        final long[] dst = bulk; // non-null: the consumer took the bulk offer
+        int k = bulkAt;
         final int safe = end - 10; // last start position with a full varint's room
         while (remaining > 0) {
             long val;
@@ -888,18 +902,30 @@ public final class IStream {
                     // Element spills past the buffer: machine finishes it from p. The
                     // straddling element is still uncounted, so write back its count.
                     arrayRemaining = remaining;
+                    bulkAt = k;
                     state = S_VARINT_UNSIGNED;
                     return p;
                 }
                 val = tail;
                 p = scratchPos;
             }
-            visitor.unsigned(fieldId, val);
+            // One predictable branch instead of a call: the whole array takes the
+            // same arm, and the destination was resolved once at the header.
+            if (dst != null) {
+                dst[k++] = val;
+            } else {
+                visitor.unsigned(fieldId, val);
+            }
             remaining--;
         }
         arrayRemaining = remaining;
         inArray = false;
         state = S_IDLE;
+        if (dst != null) {
+            bulk = null;
+            bulkAt = k;
+            visitor.arrayBulkEnd(fieldId, k);
+        }
         return p;
     }
 
@@ -907,6 +933,8 @@ public final class IStream {
     private int signedElements(byte[] data, int p, int end, Visitor visitor) throws SofabException {
         int remaining = arrayRemaining;
         final int fieldId = id;
+        final long[] dst = bulk; // non-null: the consumer took the bulk offer
+        int k = bulkAt;
         final int safe = end - 10;
         while (remaining > 0) {
             long val;
@@ -945,18 +973,28 @@ public final class IStream {
                     // Element spills past the buffer: machine finishes it from p. The
                     // straddling element is still uncounted, so write back its count.
                     arrayRemaining = remaining;
+                    bulkAt = k;
                     state = S_VARINT_SIGNED;
                     return p;
                 }
                 val = tail;
                 p = scratchPos;
             }
-            visitor.signed(fieldId, zigzagDecode(val));
+            if (dst != null) {
+                dst[k++] = zigzagDecode(val);
+            } else {
+                visitor.signed(fieldId, zigzagDecode(val));
+            }
             remaining--;
         }
         arrayRemaining = remaining;
         inArray = false;
         state = S_IDLE;
+        if (dst != null) {
+            bulk = null;
+            bulkAt = k;
+            visitor.arrayBulkEnd(fieldId, k);
+        }
         return p;
     }
 
@@ -1096,7 +1134,11 @@ public final class IStream {
         arrayRemaining = c;
         inArray = true;
         if (emitBegin) {
+            // emitBegin is false only for a fixlen array, whose kind is not settled
+            // until its fixlen_word: this is the integer-array path, the one the
+            // bulk offer covers.
             visitor.arrayBegin(id, arrayKind, c);
+            armBulk(visitor, c);
         }
         return scratchPos;
     }
@@ -1109,6 +1151,25 @@ public final class IStream {
     private void arrayBeginFixlen(ArrayKind kind, Visitor visitor) {
         arrayKind = kind;
         visitor.arrayBegin(id, kind, arrayRemaining);
+    }
+
+    /**
+     * Put the bulk offer to the visitor for an integer array of {@code c} elements
+     * and arm the fill if it is taken. A destination shorter than the announced
+     * count is refused rather than partially filled: {@code count} is the wire's
+     * claim, and a consumer that sized against a different number must not be able
+     * to turn that into an out-of-bounds write.
+     */
+    private void armBulk(Visitor visitor, int c) {
+        bulk = null;
+        bulkAt = 0;
+        if (c == 0) {
+            return;
+        }
+        long[] dst = visitor.arrayBulk(id, arrayKind, c);
+        if (dst != null && dst.length >= c) {
+            bulk = dst;
+        }
     }
 
     /** Arm the state machine to accumulate a fixed-size fixlen value (fp32/fp64). */
@@ -1250,8 +1311,13 @@ public final class IStream {
      */
     private void stepVarintUnsigned(int b, Visitor visitor) throws SofabException {
         if (varintPush(b)) {
-            visitor.unsigned(id, varintOut);
+            if (inArray && bulk != null) {
+                bulk[bulkAt++] = varintOut;
+            } else {
+                visitor.unsigned(id, varintOut);
+            }
             advanceAfterElement();
+            endBulkIfArrayOver(visitor);
         }
     }
 
@@ -1261,8 +1327,27 @@ public final class IStream {
      */
     private void stepVarintSigned(int b, Visitor visitor) throws SofabException {
         if (varintPush(b)) {
-            visitor.signed(id, zigzagDecode(varintOut));
+            if (inArray && bulk != null) {
+                bulk[bulkAt++] = zigzagDecode(varintOut);
+            } else {
+                visitor.signed(id, zigzagDecode(varintOut));
+            }
             advanceAfterElement();
+            endBulkIfArrayOver(visitor);
+        }
+    }
+
+    /**
+     * Close an armed bulk fill once {@link #advanceAfterElement} has taken the array
+     * off the machine's hands. The bulk element loops close their own; this is the
+     * path where the LAST element of the array straddled a feed boundary, so the
+     * machine, not the loop, delivered it.
+     */
+    private void endBulkIfArrayOver(Visitor visitor) {
+        if (bulk != null && !inArray) {
+            int n = bulkAt;
+            bulk = null;
+            visitor.arrayBulkEnd(id, n);
         }
     }
 
@@ -1446,6 +1531,7 @@ public final class IStream {
         }
 
         visitor.arrayBegin(id, arrayKind, c);
+        armBulk(visitor, c);
 
         if (c == 0) {
             // Empty varint array: no elements and no fixlen_word follow; the field
