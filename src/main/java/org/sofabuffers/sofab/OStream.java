@@ -705,6 +705,14 @@ public final class OStream {
         // always is -- that is a System.arraycopy. Identifiers, codes, field names,
         // most of what a schema carries, take this path.
         //
+        // getBytes(int,int,byte[],int) is deprecated for the reason that makes it
+        // right here: it copies low bytes, not an encoding, so it is wrong for any
+        // string that is not known to be single-byte. This one is -- the scan above
+        // proved every char below 0x80 -- and it is the only way to reach the
+        // string's storage without allocating a byte[] first (which is exactly what
+        // encoding into the output buffer exists to avoid). Deprecated since 1.1,
+        // never marked forRemoval.
+        //
         // Length-gated because the copy is a call with its own bounds checks: below
         // ASCII_BULK_MIN the char loop is already fewer instructions than setting
         // one up. Room-gated because the bulk copy cannot flush mid-string, and the
