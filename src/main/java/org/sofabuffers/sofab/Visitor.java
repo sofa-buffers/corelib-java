@@ -164,13 +164,27 @@ public interface Visitor {
      * before any element, for {@link ArrayKind#UNSIGNED} and
      * {@link ArrayKind#SIGNED} arrays with at least one element.
      *
-     * <p>Return an array of <b>at least {@code count}</b> longs and the decoder
-     * writes the elements straight into {@code [0, count)} — already ZigZag-decoded
-     * for a signed array, exactly the values {@link #signed} would have delivered —
-     * with no per-element callback at all, then calls {@link #arrayBulkEnd}. Return
-     * {@code null}, the default, and the elements arrive through {@link #unsigned}
-     * / {@link #signed} as before. A shorter array than {@code count} is treated as
-     * {@code null}, so a miscounted destination cannot overrun.
+     * <p>Return a {@code byte[]}, {@code short[]}, {@code int[]} or {@code long[]}
+     * of <b>at least {@code count}</b> elements and the decoder writes straight into
+     * {@code [0, count)} — already ZigZag-decoded for a signed array, exactly the
+     * values {@link #signed} would have delivered — with no per-element callback at
+     * all, then calls {@link #arrayBulkEnd}. Return {@code null}, the default, and
+     * the elements arrive through {@link #unsigned} / {@link #signed} as before. A
+     * shorter array than {@code count}, or any other type, is treated as
+     * {@code null}, so a miscounted or mistyped destination cannot overrun.
+     *
+     * <p><b>The array's width is a bound.</b> Handing back a narrower array than
+     * {@code long[]} says the elements are declared that wide, so a value that does
+     * not fit it is malformed input and the decode fails with
+     * {@link SofabError#INVALID_MSG} — zero-extended against the width for an
+     * {@link ArrayKind#UNSIGNED} array, sign-extended for a {@link ArrayKind#SIGNED}
+     * one. The decoder never truncates silently. This is the reason to hand back a
+     * narrow array at all: the check and the narrowing happen in the same pass that
+     * decodes, instead of a second one afterwards.
+     *
+     * <p>The return type is {@code Object} rather than four overloads because the
+     * decoder must resolve the destination in ONE virtual call per array — asking
+     * four times, three of them for null, costs more than the pass it saves.
      *
      * <p>This exists because {@code count} is the one thing the consumer is told
      * before the elements arrive: a destination sized from it needs no per-element
@@ -188,7 +202,7 @@ public interface Visitor {
      * @param count number of elements the wire announced
      * @return destination of at least {@code count} longs, or null for per-element
      */
-    default long[] arrayBulk(int id, ArrayKind kind, int count) {
+    default Object arrayBulk(int id, ArrayKind kind, int count) {
         return null;
     }
 

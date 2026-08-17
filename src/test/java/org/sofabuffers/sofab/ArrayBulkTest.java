@@ -62,7 +62,7 @@ class ArrayBulkTest {
         }
 
         @Override
-        public long[] arrayBulk(int id, ArrayKind kind, int count) {
+        public Object arrayBulk(int id, ArrayKind kind, int count) {
             offers++;
             dst = new long[count];
             return dst;
@@ -87,7 +87,7 @@ class ArrayBulkTest {
         }
 
         @Override
-        public long[] arrayBulk(int id, ArrayKind kind, int count) {
+        public Object arrayBulk(int id, ArrayKind kind, int count) {
             return new long[Math.max(0, count - 1)];
         }
 
@@ -218,6 +218,162 @@ class ArrayBulkTest {
         assertEquals(src.length, bulk.endN);
     }
 
+    // --- a narrow destination declares a width ------------------------------
+
+    /** Takes the offer with an array of the width the test asks for. */
+    private static final class Narrow implements Visitor {
+        private final int width; // 1, 2, 4 or 8 bytes
+        Object dst;
+        int ends;
+        final List<Long> scalars = new ArrayList<>();
+
+        Narrow(int width) {
+            this.width = width;
+        }
+
+        @Override
+        public void unsigned(int id, long value) {
+            scalars.add(value);
+        }
+
+        @Override
+        public void signed(int id, long value) {
+            scalars.add(value);
+        }
+
+        @Override
+        public Object arrayBulk(int id, ArrayKind kind, int count) {
+            dst = switch (width) {
+                case 1 -> new byte[count];
+                case 2 -> new short[count];
+                case 4 -> new int[count];
+                default -> new long[count];
+            };
+            return dst;
+        }
+
+        @Override
+        public void arrayBulkEnd(int id, int n) {
+            ends++;
+        }
+    }
+
+    @Test
+    void anUnsignedArrayFillsAByteDestinationWithTheDeclaredWidthsBits() throws IOException {
+        byte[] msg = encode(os -> os.writeArrayUnsigned(1, new long[] {0, 1, 127, 128, 200, 255}));
+        Narrow v = new Narrow(1);
+        new IStream().feed(msg, v);
+
+        // The bits of the VALUE, read back through a signed Java byte.
+        assertArrayEquals(new byte[] {0, 1, 127, -128, -56, -1}, (byte[]) v.dst);
+        assertEquals(1, v.ends);
+        assertTrue(v.scalars.isEmpty());
+    }
+
+    @Test
+    void aSignedArrayFillsAByteDestinationExactly() throws IOException {
+        byte[] msg = encode(os -> os.writeArraySigned(1, new long[] {-128, -1, 0, 1, 127}));
+        Narrow v = new Narrow(1);
+        new IStream().feed(msg, v);
+
+        assertArrayEquals(new byte[] {-128, -1, 0, 1, 127}, (byte[]) v.dst);
+    }
+
+    @Test
+    void shortAndIntDestinationsTakeTheirWidths() throws IOException {
+        byte[] m16 = encode(os -> os.writeArrayUnsigned(1, new long[] {0, 32768, 65535}));
+        Narrow v16 = new Narrow(2);
+        new IStream().feed(m16, v16);
+        assertArrayEquals(new short[] {0, (short) 32768, (short) 65535}, (short[]) v16.dst);
+
+        byte[] m32 = encode(os -> os.writeArrayUnsigned(1, new long[] {0, 2147483648L, 4294967295L}));
+        Narrow v32 = new Narrow(4);
+        new IStream().feed(m32, v32);
+        assertArrayEquals(new int[] {0, (int) 2147483648L, (int) 4294967295L}, (int[]) v32.dst);
+    }
+
+    /**
+     * The point of narrowing in the decoder rather than after it: a value the
+     * destination cannot hold is malformed input, not something to truncate. One
+     * bit past the width is enough, and it is INVALID for the unsigned and the
+     * signed reading alike.
+     */
+    @Test
+    void aValueWiderThanTheDestinationIsInvalid() throws IOException {
+        record Case(int width, boolean signed, long value) {}
+        List<Case> cases = List.of(
+                new Case(1, false, 256), new Case(1, false, -1),
+                new Case(2, false, 65536), new Case(4, false, 4294967296L),
+                new Case(1, true, 128), new Case(1, true, -129),
+                new Case(2, true, 32768), new Case(4, true, 2147483648L));
+        for (Case c : cases) {
+            byte[] msg = c.signed()
+                    ? encode(os -> os.writeArraySigned(1, new long[] {0, c.value()}))
+                    : encode(os -> os.writeArrayUnsigned(1, new long[] {0, c.value()}));
+            Narrow v = new Narrow(c.width());
+            IStream is = new IStream();
+            SofabException e = org.junit.jupiter.api.Assertions.assertThrows(SofabException.class,
+                    () -> is.feed(msg, v), c + " must not decode");
+            assertEquals(SofabError.INVALID_MSG, e.error(), c.toString());
+            assertEquals(DecodeStatus.INVALID, is.status(), c + " is terminal");
+        }
+    }
+
+    /** The widest value each width DOES hold, so the guard above is not just strict. */
+    @Test
+    void theWidestValueEachWidthHoldsStillDecodes() throws IOException {
+        byte[] u8 = encode(os -> os.writeArrayUnsigned(1, new long[] {255}));
+        Narrow v8 = new Narrow(1);
+        new IStream().feed(u8, v8);
+        assertArrayEquals(new byte[] {-1}, (byte[]) v8.dst);
+
+        byte[] i32 = encode(os -> os.writeArraySigned(1, new long[] {-2147483648L, 2147483647L}));
+        Narrow v32 = new Narrow(4);
+        new IStream().feed(i32, v32);
+        assertArrayEquals(new int[] {-2147483648, 2147483647}, (int[]) v32.dst);
+    }
+
+    /** A narrow fill crosses a feed boundary exactly like the long one. */
+    @Test
+    void aNarrowFillSurvivesEveryChunkBoundary() throws IOException {
+        long[] src = {0, 1, 200, 255, 128, 64, 7};
+        byte[] msg = encode(os -> os.writeArrayUnsigned(1, src));
+        byte[] want = new byte[src.length];
+        for (int i = 0; i < src.length; i++) {
+            want[i] = (byte) src[i];
+        }
+        for (int cut = 0; cut <= msg.length; cut++) {
+            Narrow v = new Narrow(1);
+            IStream is = new IStream();
+            is.feed(msg, 0, cut, v);
+            is.feed(msg, cut, msg.length - cut, v);
+            assertEquals(DecodeStatus.COMPLETE, is.status(), "cut at " + cut);
+            assertArrayEquals(want, (byte[]) v.dst, "cut at " + cut);
+            assertEquals(1, v.ends, "cut at " + cut);
+        }
+    }
+
+    /** A type the decoder cannot fill is refused, not guessed at. */
+    @Test
+    void aNonIntegerDestinationIsRefused() throws IOException {
+        long[] src = mixedUnsigned(6);
+        byte[] msg = encode(os -> os.writeArrayUnsigned(1, src));
+        List<Long> got = new ArrayList<>();
+        Visitor v = new Visitor() {
+            @Override
+            public void unsigned(int id, long value) {
+                got.add(value);
+            }
+
+            @Override
+            public Object arrayBulk(int id, ArrayKind kind, int count) {
+                return new float[count];
+            }
+        };
+        new IStream().feed(msg, v);
+        assertArrayEquals(src, boxedToLongs(got), "every element still arrives per-element");
+    }
+
     // --- what is NOT offered ------------------------------------------------
 
     @Test
@@ -300,7 +456,7 @@ class ArrayBulkTest {
         List<long[]> taken = new ArrayList<>();
         Visitor v = new Visitor() {
             @Override
-            public long[] arrayBulk(int id, ArrayKind kind, int count) {
+            public Object arrayBulk(int id, ArrayKind kind, int count) {
                 long[] dst = new long[count];
                 taken.add(dst);
                 return dst;

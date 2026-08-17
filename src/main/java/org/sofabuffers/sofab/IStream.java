@@ -188,14 +188,28 @@ public final class IStream {
     private int accLen;
 
     /**
-     * Destination of an accepted {@link Visitor#arrayBulk} offer, or null when the
-     * elements go through the per-element callbacks. Non-null only between the
-     * offer and {@link Visitor#arrayBulkEnd}, so it also survives a feed boundary
-     * inside the array: both the bulk element loops and the resumable machine write
-     * through it, and {@link #bulkAt} counts what has been written so far.
+     * Destination of an accepted {@link Visitor#arrayBulk} offer. {@link #bulkW}
+     * says which of the four is live -- W_NONE when the elements go through the
+     * per-element callbacks instead -- and it is resolved ONCE per array, so the
+     * element loops branch on a hoisted local rather than a type test. Live only
+     * between the offer and {@link Visitor#arrayBulkEnd}, so the fill also survives
+     * a feed boundary inside the array: both the bulk element loops and the
+     * resumable machine write through it, and {@link #bulkAt} counts what has been
+     * written so far.
      */
-    private long[] bulk;
+    private byte[] bulkB;
+    private short[] bulkS;
+    private int[] bulkI;
+    private long[] bulkL;
+    private int bulkW;
     private int bulkAt;
+
+    /** {@link #bulkW} values: no offer taken, then the four destination widths. */
+    private static final int W_NONE = 0;
+    private static final int W_BYTE8 = 1;
+    private static final int W_SHORT16 = 2;
+    private static final int W_INT32 = 3;
+    private static final int W_LONG64 = 4;
 
     // sequence nesting depth (for balanced start/end validation)
     private long depth;
@@ -261,7 +275,11 @@ public final class IStream {
         fixlenTotal = 0;
         fixlenRemaining = 0;
         accLen = 0;
-        bulk = null;
+        bulkB = null;
+        bulkS = null;
+        bulkI = null;
+        bulkL = null;
+        bulkW = W_NONE;
         bulkAt = 0;
         depth = 0;
         invalid = false;
@@ -862,7 +880,7 @@ public final class IStream {
         // from memory each time would add a load/store to every element.
         int remaining = arrayRemaining;
         final int fieldId = id;
-        final long[] dst = bulk; // non-null: the consumer took the bulk offer
+        final int bw = bulkW; // resolved once at the header; W_NONE = per-element
         int k = bulkAt;
         final int safe = end - 10; // last start position with a full varint's room
         while (remaining > 0) {
@@ -911,20 +929,19 @@ public final class IStream {
             }
             // One predictable branch instead of a call: the whole array takes the
             // same arm, and the destination was resolved once at the header.
-            if (dst != null) {
-                dst[k++] = val;
-            } else {
+            if (bw == W_NONE) {
                 visitor.unsigned(fieldId, val);
+            } else {
+                storeUnsigned(bw, k++, val);
             }
             remaining--;
         }
         arrayRemaining = remaining;
         inArray = false;
         state = S_IDLE;
-        if (dst != null) {
-            bulk = null;
+        if (bw != W_NONE) {
             bulkAt = k;
-            visitor.arrayBulkEnd(fieldId, k);
+            endBulk(visitor, fieldId);
         }
         return p;
     }
@@ -933,7 +950,7 @@ public final class IStream {
     private int signedElements(byte[] data, int p, int end, Visitor visitor) throws SofabException {
         int remaining = arrayRemaining;
         final int fieldId = id;
-        final long[] dst = bulk; // non-null: the consumer took the bulk offer
+        final int bw = bulkW; // resolved once at the header; W_NONE = per-element
         int k = bulkAt;
         final int safe = end - 10;
         while (remaining > 0) {
@@ -980,20 +997,19 @@ public final class IStream {
                 val = tail;
                 p = scratchPos;
             }
-            if (dst != null) {
-                dst[k++] = zigzagDecode(val);
-            } else {
+            if (bw == W_NONE) {
                 visitor.signed(fieldId, zigzagDecode(val));
+            } else {
+                storeSigned(bw, k++, zigzagDecode(val));
             }
             remaining--;
         }
         arrayRemaining = remaining;
         inArray = false;
         state = S_IDLE;
-        if (dst != null) {
-            bulk = null;
+        if (bw != W_NONE) {
             bulkAt = k;
-            visitor.arrayBulkEnd(fieldId, k);
+            endBulk(visitor, fieldId);
         }
         return p;
     }
@@ -1161,14 +1177,97 @@ public final class IStream {
      * to turn that into an out-of-bounds write.
      */
     private void armBulk(Visitor visitor, int c) {
-        bulk = null;
+        bulkB = null;
+        bulkS = null;
+        bulkI = null;
+        bulkL = null;
+        bulkW = W_NONE;
         bulkAt = 0;
         if (c == 0) {
             return;
         }
-        long[] dst = visitor.arrayBulk(id, arrayKind, c);
-        if (dst != null && dst.length >= c) {
-            bulk = dst;
+        Object dst = visitor.arrayBulk(id, arrayKind, c);
+        // One virtual call and one type resolution per ARRAY. Anything that is not
+        // a primitive integer array long enough for the announced count is refused
+        // and the elements go the ordinary way, so neither a miscounted nor a
+        // mistyped destination can overrun.
+        if (dst instanceof long[] a) {
+            if (a.length >= c) {
+                bulkL = a;
+                bulkW = W_LONG64;
+            }
+        } else if (dst instanceof int[] a) {
+            if (a.length >= c) {
+                bulkI = a;
+                bulkW = W_INT32;
+            }
+        } else if (dst instanceof short[] a) {
+            if (a.length >= c) {
+                bulkS = a;
+                bulkW = W_SHORT16;
+            }
+        } else if (dst instanceof byte[] a) {
+            if (a.length >= c) {
+                bulkB = a;
+                bulkW = W_BYTE8;
+            }
+        }
+    }
+
+    /**
+     * Store one UNSIGNED element into the armed destination, rejecting a value the
+     * destination's width cannot hold. Handing back a narrow array declares the
+     * width; a value with a bit above it is malformed input (MESSAGE_SPEC §7.1),
+     * never silently truncated.
+     */
+    private void storeUnsigned(int w, int k, long v) throws SofabException {
+        switch (w) {
+            case W_LONG64:
+                bulkL[k] = v;
+                return;
+            case W_INT32:
+                if ((v & ~0xFFFFFFFFL) != 0) {
+                    throw new SofabException(SofabError.INVALID_MSG, "array element wider than its destination");
+                }
+                bulkI[k] = (int) v;
+                return;
+            case W_SHORT16:
+                if ((v & ~0xFFFFL) != 0) {
+                    throw new SofabException(SofabError.INVALID_MSG, "array element wider than its destination");
+                }
+                bulkS[k] = (short) v;
+                return;
+            default:
+                if ((v & ~0xFFL) != 0) {
+                    throw new SofabException(SofabError.INVALID_MSG, "array element wider than its destination");
+                }
+                bulkB[k] = (byte) v;
+        }
+    }
+
+    /** {@link #storeUnsigned} for a SIGNED array: the width test is the round trip. */
+    private void storeSigned(int w, int k, long v) throws SofabException {
+        switch (w) {
+            case W_LONG64:
+                bulkL[k] = v;
+                return;
+            case W_INT32:
+                if ((int) v != v) {
+                    throw new SofabException(SofabError.INVALID_MSG, "array element wider than its destination");
+                }
+                bulkI[k] = (int) v;
+                return;
+            case W_SHORT16:
+                if ((short) v != v) {
+                    throw new SofabException(SofabError.INVALID_MSG, "array element wider than its destination");
+                }
+                bulkS[k] = (short) v;
+                return;
+            default:
+                if ((byte) v != v) {
+                    throw new SofabException(SofabError.INVALID_MSG, "array element wider than its destination");
+                }
+                bulkB[k] = (byte) v;
         }
     }
 
@@ -1311,8 +1410,8 @@ public final class IStream {
      */
     private void stepVarintUnsigned(int b, Visitor visitor) throws SofabException {
         if (varintPush(b)) {
-            if (inArray && bulk != null) {
-                bulk[bulkAt++] = varintOut;
+            if (inArray && bulkW != W_NONE) {
+                storeUnsigned(bulkW, bulkAt++, varintOut);
             } else {
                 visitor.unsigned(id, varintOut);
             }
@@ -1327,8 +1426,8 @@ public final class IStream {
      */
     private void stepVarintSigned(int b, Visitor visitor) throws SofabException {
         if (varintPush(b)) {
-            if (inArray && bulk != null) {
-                bulk[bulkAt++] = zigzagDecode(varintOut);
+            if (inArray && bulkW != W_NONE) {
+                storeSigned(bulkW, bulkAt++, zigzagDecode(varintOut));
             } else {
                 visitor.signed(id, zigzagDecode(varintOut));
             }
@@ -1344,11 +1443,20 @@ public final class IStream {
      * machine, not the loop, delivered it.
      */
     private void endBulkIfArrayOver(Visitor visitor) {
-        if (bulk != null && !inArray) {
-            int n = bulkAt;
-            bulk = null;
-            visitor.arrayBulkEnd(id, n);
+        if (bulkW != W_NONE && !inArray) {
+            endBulk(visitor, id);
         }
+    }
+
+    /** Release the armed destination and tell the consumer how much was written. */
+    private void endBulk(Visitor visitor, int fieldId) {
+        int n = bulkAt;
+        bulkB = null;
+        bulkS = null;
+        bulkI = null;
+        bulkL = null;
+        bulkW = W_NONE;
+        visitor.arrayBulkEnd(fieldId, n);
     }
 
     /** Shared "next element or back to idle" logic for varint scalars/arrays. */

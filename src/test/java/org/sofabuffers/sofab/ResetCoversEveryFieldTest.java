@@ -206,6 +206,9 @@ class ResetCoversEveryFieldTest {
         if (t == long[].class) {
             return new long[] {0x5A};
         }
+        if (t == short[].class) {
+            return new short[] {0x5A};
+        }
         if (t.isEnum()) {
             for (Object constant : t.getEnumConstants()) {
                 if (constant != current) {
