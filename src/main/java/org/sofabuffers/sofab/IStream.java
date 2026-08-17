@@ -880,7 +880,13 @@ public final class IStream {
         // from memory each time would add a load/store to every element.
         int remaining = arrayRemaining;
         final int fieldId = id;
-        final int bw = bulkW; // resolved once at the header; W_NONE = per-element
+        // Resolved once at the header and hoisted whole: the destination cannot
+        // change while the array runs, so the loop reads locals, not fields.
+        final int bw = bulkW; // W_NONE = per-element
+        final byte[] dB = bulkB;
+        final short[] dS = bulkS;
+        final int[] dI = bulkI;
+        final long[] dL = bulkL;
         int k = bulkAt;
         final int safe = end - 10; // last start position with a full varint's room
         while (remaining > 0) {
@@ -929,10 +935,12 @@ public final class IStream {
             }
             // One predictable branch instead of a call: the whole array takes the
             // same arm, and the destination was resolved once at the header.
-            if (bw == W_NONE) {
-                visitor.unsigned(fieldId, val);
-            } else {
-                storeUnsigned(bw, k++, val);
+            switch (bw) {
+                case W_LONG64  -> dL[k++] = val;
+                case W_INT32   -> dI[k++] = narrowU32(val);
+                case W_SHORT16 -> dS[k++] = narrowU16(val);
+                case W_BYTE8   -> dB[k++] = narrowU8(val);
+                default        -> visitor.unsigned(fieldId, val); // W_NONE
             }
             remaining--;
         }
@@ -950,7 +958,13 @@ public final class IStream {
     private int signedElements(byte[] data, int p, int end, Visitor visitor) throws SofabException {
         int remaining = arrayRemaining;
         final int fieldId = id;
-        final int bw = bulkW; // resolved once at the header; W_NONE = per-element
+        // Resolved once at the header and hoisted whole: the destination cannot
+        // change while the array runs, so the loop reads locals, not fields.
+        final int bw = bulkW; // W_NONE = per-element
+        final byte[] dB = bulkB;
+        final short[] dS = bulkS;
+        final int[] dI = bulkI;
+        final long[] dL = bulkL;
         int k = bulkAt;
         final int safe = end - 10;
         while (remaining > 0) {
@@ -997,10 +1011,12 @@ public final class IStream {
                 val = tail;
                 p = scratchPos;
             }
-            if (bw == W_NONE) {
-                visitor.signed(fieldId, zigzagDecode(val));
-            } else {
-                storeSigned(bw, k++, zigzagDecode(val));
+            switch (bw) {
+                case W_LONG64  -> dL[k++] = zigzagDecode(val);
+                case W_INT32   -> dI[k++] = narrowI32(zigzagDecode(val));
+                case W_SHORT16 -> dS[k++] = narrowI16(zigzagDecode(val));
+                case W_BYTE8   -> dB[k++] = narrowI8(zigzagDecode(val));
+                default        -> visitor.signed(fieldId, zigzagDecode(val)); // W_NONE
             }
             remaining--;
         }
@@ -1215,60 +1231,59 @@ public final class IStream {
     }
 
     /**
-     * Store one UNSIGNED element into the armed destination, rejecting a value the
-     * destination's width cannot hold. Handing back a narrow array declares the
-     * width; a value with a bit above it is malformed input (MESSAGE_SPEC §7.1),
-     * never silently truncated.
+     * Narrow one decoded element to the width of the destination the consumer
+     * handed back, rejecting a value that width cannot hold.
+     *
+     * <p>Handing back an array narrower than {@code long[]} declares the elements
+     * that wide, so a value with a bit past it is malformed input (MESSAGE_SPEC
+     * §7.1) and never silently truncated. Unsigned widths test the bits above the
+     * width; signed ones test that narrowing and widening again gives the value
+     * back, which is the same statement.
      */
-    private void storeUnsigned(int w, int k, long v) throws SofabException {
-        switch (w) {
-            case W_LONG64:
-                bulkL[k] = v;
-                return;
-            case W_INT32:
-                if ((v & ~0xFFFFFFFFL) != 0) {
-                    throw new SofabException(SofabError.INVALID_MSG, "array element wider than its destination");
-                }
-                bulkI[k] = (int) v;
-                return;
-            case W_SHORT16:
-                if ((v & ~0xFFFFL) != 0) {
-                    throw new SofabException(SofabError.INVALID_MSG, "array element wider than its destination");
-                }
-                bulkS[k] = (short) v;
-                return;
-            default:
-                if ((v & ~0xFFL) != 0) {
-                    throw new SofabException(SofabError.INVALID_MSG, "array element wider than its destination");
-                }
-                bulkB[k] = (byte) v;
+    private static int narrowU32(long v) throws SofabException {
+        if ((v & ~0xFFFFFFFFL) != 0) {
+            throw tooWide();
         }
+        return (int) v;
     }
 
-    /** {@link #storeUnsigned} for a SIGNED array: the width test is the round trip. */
-    private void storeSigned(int w, int k, long v) throws SofabException {
-        switch (w) {
-            case W_LONG64:
-                bulkL[k] = v;
-                return;
-            case W_INT32:
-                if ((int) v != v) {
-                    throw new SofabException(SofabError.INVALID_MSG, "array element wider than its destination");
-                }
-                bulkI[k] = (int) v;
-                return;
-            case W_SHORT16:
-                if ((short) v != v) {
-                    throw new SofabException(SofabError.INVALID_MSG, "array element wider than its destination");
-                }
-                bulkS[k] = (short) v;
-                return;
-            default:
-                if ((byte) v != v) {
-                    throw new SofabException(SofabError.INVALID_MSG, "array element wider than its destination");
-                }
-                bulkB[k] = (byte) v;
+    private static short narrowU16(long v) throws SofabException {
+        if ((v & ~0xFFFFL) != 0) {
+            throw tooWide();
         }
+        return (short) v;
+    }
+
+    private static byte narrowU8(long v) throws SofabException {
+        if ((v & ~0xFFL) != 0) {
+            throw tooWide();
+        }
+        return (byte) v;
+    }
+
+    private static int narrowI32(long v) throws SofabException {
+        if ((int) v != v) {
+            throw tooWide();
+        }
+        return (int) v;
+    }
+
+    private static short narrowI16(long v) throws SofabException {
+        if ((short) v != v) {
+            throw tooWide();
+        }
+        return (short) v;
+    }
+
+    private static byte narrowI8(long v) throws SofabException {
+        if ((byte) v != v) {
+            throw tooWide();
+        }
+        return (byte) v;
+    }
+
+    private static SofabException tooWide() {
+        return new SofabException(SofabError.INVALID_MSG, "array element wider than its destination");
     }
 
     /** Arm the state machine to accumulate a fixed-size fixlen value (fp32/fp64). */
@@ -1411,7 +1426,7 @@ public final class IStream {
     private void stepVarintUnsigned(int b, Visitor visitor) throws SofabException {
         if (varintPush(b)) {
             if (inArray && bulkW != W_NONE) {
-                storeUnsigned(bulkW, bulkAt++, varintOut);
+                storeBulk(varintOut);
             } else {
                 visitor.unsigned(id, varintOut);
             }
@@ -1427,7 +1442,7 @@ public final class IStream {
     private void stepVarintSigned(int b, Visitor visitor) throws SofabException {
         if (varintPush(b)) {
             if (inArray && bulkW != W_NONE) {
-                storeSigned(bulkW, bulkAt++, zigzagDecode(varintOut));
+                storeBulkSigned(zigzagDecode(varintOut));
             } else {
                 visitor.signed(id, zigzagDecode(varintOut));
             }
@@ -1445,6 +1460,30 @@ public final class IStream {
     private void endBulkIfArrayOver(Visitor visitor) {
         if (bulkW != W_NONE && !inArray) {
             endBulk(visitor, id);
+        }
+    }
+
+    /**
+     * The element loops' store, for the one element the byte-at-a-time machine
+     * delivers when an element straddles a feed boundary. Off the hot path, so it
+     * reads the fields rather than hoisting them.
+     */
+    private void storeBulk(long v) throws SofabException {
+        switch (bulkW) {
+            case W_LONG64  -> bulkL[bulkAt++] = v;
+            case W_INT32   -> bulkI[bulkAt++] = narrowU32(v);
+            case W_SHORT16 -> bulkS[bulkAt++] = narrowU16(v);
+            default        -> bulkB[bulkAt++] = narrowU8(v);
+        }
+    }
+
+    /** {@link #storeBulk} for a SIGNED array. */
+    private void storeBulkSigned(long v) throws SofabException {
+        switch (bulkW) {
+            case W_LONG64  -> bulkL[bulkAt++] = v;
+            case W_INT32   -> bulkI[bulkAt++] = narrowI32(v);
+            case W_SHORT16 -> bulkS[bulkAt++] = narrowI16(v);
+            default        -> bulkB[bulkAt++] = narrowI8(v);
         }
     }
 
