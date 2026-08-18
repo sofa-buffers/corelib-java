@@ -5,9 +5,13 @@
  */
 package org.sofabuffers.sofab;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 
@@ -104,5 +108,60 @@ class Utf8Test {
         byte[] b = {(byte) 0xE0, (byte) 0xA0, (byte) 0x80};
         assertTrue(Utf8.valid(b, 0, 3));
         assertFalse(Utf8.valid(b, 0, 2));
+    }
+
+    // --- decode: validate, then materialize ----------------------------------
+
+    /** The ordinary case, over a slice of a larger buffer. */
+    @Test
+    void decodeMaterializesTheGivenRangeOnly() {
+        byte[] b = "xxhello worldxx".getBytes(StandardCharsets.UTF_8);
+        assertEquals("hello world", Utf8.decode(b, 2, 11));
+        assertEquals("", Utf8.decode(b, 2, 0));
+        byte[] mixed = "aä€𝄞z".getBytes(StandardCharsets.UTF_8);
+        assertEquals("aä€𝄞z", Utf8.decode(mixed, 0, mixed.length));
+    }
+
+    /**
+     * The whole point of validating first: {@code new String(b, UTF_8)} would
+     * return "\uFFFD" here and no later check could tell. MESSAGE_SPEC §7 wants
+     * the message rejected, not the string repaired.
+     */
+    @Test
+    void decodeRejectsRatherThanSubstitutingTheReplacementCharacter() {
+        byte[] lone = {(byte) 0xED, (byte) 0xA0, (byte) 0x80};
+        assertTrue(new String(lone, StandardCharsets.UTF_8).contains("\uFFFD"),
+                "the JDK conversion repairs it, which is why it cannot be the check");
+
+        UncheckedIOException e =
+                assertThrows(UncheckedIOException.class, () -> Utf8.decode(lone, 0, 3));
+        SofabException cause = assertInstanceOf(SofabException.class, e.getCause());
+        assertEquals(SofabError.INVALID_MSG, cause.error());
+    }
+
+    /** The verdict is the validator's, on exactly the range decode was given. */
+    @Test
+    void decodeRejectsWhateverValidRejects() {
+        byte[][] bad = {
+            {(byte) 0xC0, (byte) 0x80},                            // overlong NUL
+            {(byte) 0xF5, (byte) 0x80, (byte) 0x80, (byte) 0x80},  // above U+10FFFF
+            {(byte) 0x80},                                         // bare continuation
+            {(byte) 0xE0, (byte) 0xA0},                            // truncated sequence
+        };
+        for (byte[] b : bad) {
+            assertFalse(Utf8.valid(b, 0, b.length));
+            assertThrows(UncheckedIOException.class, () -> Utf8.decode(b, 0, b.length));
+        }
+    }
+
+    /**
+     * A sequence that is only complete <em>outside</em> the range is still
+     * malformed: decode is handed a whole field, not a stream position.
+     */
+    @Test
+    void decodeJudgesTheRangeItWasGivenNotTheBuffer() {
+        byte[] b = {(byte) 0xE0, (byte) 0xA0, (byte) 0x80};
+        assertEquals("\u0800", Utf8.decode(b, 0, 3));
+        assertThrows(UncheckedIOException.class, () -> Utf8.decode(b, 0, 2));
     }
 }

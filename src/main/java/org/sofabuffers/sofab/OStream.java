@@ -172,6 +172,12 @@ public final class OStream {
     private int nPending;
 
     /**
+     * The per-thread scratch buffer {@link #overScratch} hands out. Never null once
+     * a thread has asked for one, and only ever replaced by a longer array.
+     */
+    private static final ThreadLocal<byte[]> SCRATCH = new ThreadLocal<>();
+
+    /**
      * Create an encoder over {@code buffer} with no flush sink. Writing past the
      * end of the buffer raises {@link SofabError#BUFFER_FULL}.
      *
@@ -248,6 +254,66 @@ public final class OStream {
      */
     public int bytesUsed() {
         return offset;
+    }
+
+    /**
+     * An encoder over a <b>per-thread scratch buffer</b> of at least {@code size}
+     * bytes — the mechanism behind a one-shot {@code encode()} that returns a fresh
+     * array without re-allocating (and re-zeroing) a worst-case buffer per call.
+     *
+     * <p>{@code size} is the caller's: CORELIB_PLAN §5.1 leaves the output buffer's
+     * size to the layer that knows the message, so generated code passes its own
+     * {@code MAX_SIZE} and this library never invents one. What lives here is only
+     * the reuse — a thread-confined array, kept between calls and grown, never
+     * shrunk, to the largest size that thread has asked for. Encoding several
+     * message types on one thread therefore shares one buffer, and the returned
+     * stream may be over a <em>longer</em> array than requested; bound the message
+     * by its own {@code MAX_SIZE} rather than by the buffer's length.
+     *
+     * <p>The buffer is <b>reused, not owned</b>: everything written into it is
+     * valid only until the same thread calls this again. Take the bytes out with
+     * {@link #copyOfBytesUsed()} before that happens, and do not call it
+     * re-entrantly — an {@code encode()} reached from inside another message's
+     * {@code serialize} on the same thread overwrites the outer one's bytes.
+     * A caller that needs to hold the buffer hands in its own with
+     * {@link #OStream(byte[])} instead.
+     *
+     * <p>The stream has no {@link FlushSink}: a scratch buffer sized to hold the
+     * whole message has nowhere to flush to, and a message that outgrows it raises
+     * {@link SofabError#BUFFER_FULL} — the streaming path is the caller's own
+     * buffer plus a sink.
+     *
+     * @param size smallest buffer that will do, normally the generated
+     *             {@code MAX_SIZE}
+     * @return an encoder positioned at the start of this thread's scratch buffer
+     * @throws IllegalArgumentException if {@code size} is not positive
+     */
+    public static OStream overScratch(int size) {
+        if (size < 1) {
+            throw new IllegalArgumentException("scratch buffer size must be positive");
+        }
+        byte[] buf = SCRATCH.get();
+        if (buf == null || buf.length < size) {
+            buf = new byte[size];
+            SCRATCH.set(buf);
+        }
+        return new OStream(buf);
+    }
+
+    /**
+     * An exact-size copy of {@code [0, bytesUsed())} — the bytes standing in the
+     * active buffer.
+     *
+     * <p>This is how a one-shot encode ends: write the whole message into a buffer
+     * that holds it, then hand the caller an array of exactly the message's length.
+     * It pairs with {@link #overScratch}, whose buffer must not escape, and it is
+     * the only way to get bytes out of one. It says nothing about a stream with a
+     * {@link FlushSink}, where earlier bytes have already left the buffer.
+     *
+     * @return the bytes written so far, copied out
+     */
+    public byte[] copyOfBytesUsed() {
+        return Arrays.copyOf(buffer, offset);
     }
 
     /**
