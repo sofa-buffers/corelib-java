@@ -1,0 +1,45 @@
+name: "Version consistency"
+
+# The git tag is the source of truth for the version: the Maven project version
+# in pom.xml must match it. Modelled on corelib-c-cpp's workflow of the same
+# name, minus the manifests this repo does not have — Maven is the only one.
+#
+# Tags only: the comparison is only meaningful when there is a tag to compare
+# against. Between releases pom.xml may legitimately sit ahead of the newest
+# tag, so running this on every push and pull request would produce noise, not
+# signal — and cost a runner slot per run.
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check-versions:
+    name: Check versions
+    runs-on: ubuntu-latest
+    # Bound the job: checkout plus one XML read, a couple of seconds at most.
+    # A wedged job would otherwise hold one of the account's 20 Actions slots
+    # for GitHub's six-hour default.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check Maven (pom.xml)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref_version="${GITHUB_REF_NAME#v}"
+          # The project's own <version> is a direct child of <project>; a
+          # dependency's or a plugin's version sits deeper, so parse the XML
+          # instead of grepping the first match.
+          version=$(python3 -c 'import xml.etree.ElementTree as ET; v = ET.parse("pom.xml").getroot().find("{http://maven.apache.org/POM/4.0.0}version"); print("" if v is None else (v.text or "").strip())')
+          [[ -n "$version" ]] || { echo "::error::pom.xml: no project <version> found"; exit 1; }
+          echo "tag=$ref_version  pom.xml=$version"
+          [[ "$version" == "$ref_version" ]] || {
+            echo "::error::pom.xml version: '$version' != tag '$ref_version'"; exit 1; }
