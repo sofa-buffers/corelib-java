@@ -263,6 +263,31 @@ over; a still-`INCOMPLETE` status at that point is a truncated message. Give the
 encoder's `OStream` a `FlushSink` and the same `serialize` streams a message larger
 than the buffer, so neither direction ever needs the whole message in RAM.
 
+## Generated-code support layer
+
+Around every codec call, generated code does the same few things: put an element at
+the index its id names, grow an array as elements actually arrive, reassemble a
+payload that arrived in pieces, turn validated bytes into a `String`, report a
+schema bound the wire broke. None of that is schema-specific — a `count`, a
+`maxlen` or a capacity is an argument, an element type is a type parameter — so it
+lives here instead of being emitted, with its rationale, into every generated
+package.
+
+| symbol | what it is |
+|---|---|
+| `Seq.reserveRow` / `reserveRowBytes` … `reserveRowDoubles` | place a matrix row at the index its id names, filling a gap with the empty row rather than shifting every later row down (MESSAGE_SPEC §5.1 / §7.4) |
+| `Seq.ensureCap` (one per primitive width) | the array-growth policy: double, stop at the announced count, and never allocate from a count the wire claimed but has not delivered |
+| `Seq.ARRAY_INIT_CAP`, `Seq.EMPTY_BYTES` … `EMPTY_DOUBLES` | the bounded first reservation, and the shared zero-length arrays a field initializer points at |
+| `Seq.reset` / `Seq.orEmpty` / `Seq.boolsToLongs` | re-arm a reused destination in place; absorb a null field on the encode side; the one boxed-to-primitive conversion `bool` still needs |
+| `PayloadAcc` | reassemble a `string` / `blob` payload split across feeds — a payload that arrives whole never touches its buffer, and the value never depends on where the split fell |
+| `Utf8.decode` | validate a byte range and materialize it, in that order — the only order in which invalid UTF-8 can still be rejected (§6.4) |
+| `Sofab.invalid` | the carrier a `Visitor` rejects malformed input through, since a callback declares no checked exception; `IStream.feed` latches it as terminal like its own rejections |
+| `OStream.overScratch` / `copyOfBytesUsed` | a per-thread buffer for a one-shot `encode()`, so the worst case is allocated once per thread rather than once per call. The **size** stays with the caller (CORELIB_PLAN §5.1): generated code passes its own `MAX_SIZE` |
+
+These are ordinary public API, usable directly; they are simply shaped by what
+generated code needs. Older generated sources carry their own copies of some of
+them and keep working unchanged.
+
 ## Memory handling
 
 The library never allocates the payload buffer; the API is `byte[]`-based

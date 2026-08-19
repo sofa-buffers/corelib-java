@@ -1,17 +1,20 @@
 package org.sofabuffers.sofab;
 
+import java.nio.charset.StandardCharsets;
+
 /**
- * UTF-8 validation of a raw byte range, for both sides of a {@code string} field
- * (CORELIB_PLAN §6.4).
+ * UTF-8 validation — and, on the decode side, materialization — of a raw byte
+ * range, for both sides of a {@code string} field (CORELIB_PLAN §6.4).
  *
  * <p>{@link OStream#writeString} rejects an invalid {@code String} while
  * measuring it, but wherever a {@code string} is handled as <em>raw bytes</em>
  * this validator is what enforces the contract: on encode for the byte-container
  * entry point {@link OStream#writeFixlen} with {@link FixlenType#STRING}, and on
  * decode for bytes arriving from a peer, which must be validated <em>before</em>
- * they are handed to the consumer as a {@code String}. Generated code needs it on
- * every materialized string, so it belongs here rather than being emitted into
- * every generated message class.
+ * they are handed to the consumer as a {@code String} — which is what
+ * {@link #decode} does, in that order. Generated code needs this on every
+ * materialized string, so it belongs here rather than being emitted into every
+ * generated message class.
  *
  * <p>Validation is on the byte range, not on a constructed {@code String}:
  * {@code new String(bytes, UTF_8)} silently substitutes U+FFFD for malformed
@@ -60,5 +63,35 @@ public final class Utf8 {
             i += n + 1;
         }
         return true;
+    }
+
+    /**
+     * Materialize {@code b[off, off + len)} as a {@code String}, rejecting a range
+     * that is not well-formed UTF-8.
+     *
+     * <p>This is what a decoder does with a {@code string} payload once it is
+     * complete, and it is two steps for a reason: {@link #valid} first, the
+     * conversion second. {@code new String(bytes, UTF_8)} silently substitutes
+     * U+FFFD for malformed input, so a check made on the result can never fail —
+     * validating the bytes is what makes the rejection possible at all, and
+     * MESSAGE_SPEC §7 requires the rejection rather than a repaired string.
+     *
+     * <p>The rejection is {@link Sofab#invalid}, i.e. an {@code INVALID_MSG}
+     * {@link SofabException} wrapped so it can leave a {@link Visitor} callback,
+     * which is where generated code calls this from.
+     *
+     * @param b   buffer
+     * @param off first byte of the payload
+     * @param len payload length in bytes
+     * @return the decoded string
+     * @throws java.io.UncheckedIOException wrapping an {@code INVALID_MSG}
+     *                                      {@link SofabException} when the range is
+     *                                      not valid UTF-8
+     */
+    public static String decode(byte[] b, int off, int len) {
+        if (!valid(b, off, off + len)) {
+            throw Sofab.invalid("string: invalid UTF-8");
+        }
+        return new String(b, off, len, StandardCharsets.UTF_8);
     }
 }

@@ -1,9 +1,11 @@
 /*
- * SofaBuffers Java - library constants.
+ * SofaBuffers Java - library constants and the INVALID carrier.
  *
  * SPDX-License-Identifier: MIT
  */
 package org.sofabuffers.sofab;
+
+import java.io.UncheckedIOException;
 
 /**
  * Library-level constants for the SofaBuffers ({@code sofab}) core.
@@ -11,6 +13,10 @@ package org.sofabuffers.sofab;
  * <p>These mirror the normative limits in the SofaBuffers architecture guide
  * (§6.2). {@link #API_VERSION} lets callers and the schema-driven code generator
  * verify compatibility at build or run time.
+ *
+ * <p>{@link #invalid(String)} is here too, and is not a constant: it is the one
+ * way a {@link Visitor} — that is, generated code — reports malformed input, and
+ * belongs beside the contract it is part of.
  */
 public final class Sofab {
 
@@ -64,4 +70,44 @@ public final class Sofab {
      * growth.
      */
     public static final int MAX_DEPTH = 255;
+
+    /**
+     * The carrier a {@link Visitor} rejects malformed input through: an
+     * {@link SofabError#INVALID_MSG} {@link SofabException}, wrapped so it can
+     * leave a callback that declares no checked exception.
+     *
+     * <p>Every {@code Visitor} method is declared {@code throws}-free, because a
+     * visitor is called from the middle of the decoder's state machine and most
+     * implementations have nothing to report. Generated code does: MESSAGE_SPEC §7
+     * puts the schema bounds — a length above a {@code maxlen}, a count above a
+     * declared capacity, an index above one, a value outside a declared width, a
+     * string that is not UTF-8 — on the side that knows the schema, which is the
+     * visitor and not this library. So the rejection travels as an unchecked
+     * wrapper, and {@link IStream#feed} recognizes it on the way out: an
+     * {@code INVALID_MSG} raised by a visitor latches the decode exactly as one
+     * raised by the decoder itself does, so it is terminal and {@code status()}
+     * reports {@link DecodeStatus#INVALID} from then on (CORELIB_PLAN §5.2). The
+     * wrapper itself reaches the caller unchanged; the {@link SofabException} is
+     * its {@code cause}.
+     *
+     * <p>That makes it a two-sided contract, and this is the side that names it.
+     * Throw the result rather than calling it for effect — {@code throw
+     * Sofab.invalid(...)} ends the method as far as the compiler is concerned:
+     *
+     * <pre>{@code
+     * if (total > 8) {
+     *     throw Sofab.invalid("name: string length above schema maxlen 8");
+     * }
+     * }</pre>
+     *
+     * <p>{@link SofabError#LIMIT_EXCEEDED} — a receiver-side policy rejection of
+     * well-formed bytes (§6.2.1) — is deliberately not this, and is not latched:
+     * wrap it explicitly where it is raised.
+     *
+     * @param detail human-readable context, naming the field and the bound it broke
+     * @return the exception to throw
+     */
+    public static UncheckedIOException invalid(String detail) {
+        return new UncheckedIOException(new SofabException(SofabError.INVALID_MSG, detail));
+    }
 }
