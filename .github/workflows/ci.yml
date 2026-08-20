@@ -18,6 +18,11 @@ jobs:
   build-test:
     name: Build & test (JDK ${{ matrix.java }})
     runs-on: ubuntu-latest
+    # A hung step has to fail fast and name itself: the account's Actions
+    # concurrency is 20, so one wedged job holds a slot every other repo in
+    # the family is queuing for. This leg runs in ~25 s (checkout, JDK setup,
+    # `mvn -B verify`), so 10 min is ~20x headroom and still bounded.
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -53,6 +58,8 @@ jobs:
   coverage-badge:
     name: Coverage
     runs-on: ubuntu-latest
+    # ~21 s observed: artifact download, badge JSON generation, one push.
+    timeout-minutes: 10
     needs: build-test
     # Only refresh the badge for the canonical branch, never for PR forks.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
