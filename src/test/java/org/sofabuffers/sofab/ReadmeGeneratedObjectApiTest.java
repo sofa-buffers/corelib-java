@@ -47,8 +47,12 @@ class ReadmeGeneratedObjectApiTest {
             Path.of("src", "test", "java", "org", "sofabuffers", "sofab",
                     "ReadmeGeneratedObjectApiTest.java");
 
-    /** The spellings §6.1.1 closes out, in every casing a Java port might reach for. */
-    private static final Pattern EXCLUDED = Pattern.compile(
+    /**
+     * The spellings §6.1.1 closes out, in every casing a Java port might reach for.
+     * Shared with {@link ReadmeStructureTest} so the two README suites cannot
+     * disagree about what the closed set excludes.
+     */
+    static final Pattern EXCLUDED = Pattern.compile(
             "\\b(marshal\\w*|unmarshal\\w*|serialize_to|serializeTo|to_bytes|toBytes"
                     + "|from_bytes|fromBytes|decode_from|decodeFrom|decode_into|decodeInto)\\b",
             Pattern.CASE_INSENSITIVE);
