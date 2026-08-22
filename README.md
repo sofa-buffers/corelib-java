@@ -263,7 +263,7 @@ over; a still-`INCOMPLETE` status at that point is a truncated message. Give the
 encoder's `OStream` a `FlushSink` and the same `serialize` streams a message larger
 than the buffer, so neither direction ever needs the whole message in RAM.
 
-## Generated-code support layer
+### Generated-code support layer
 
 Around every codec call, generated code does the same few things: put an element at
 the index its id names, grow an array as elements actually arrive, reassemble a
@@ -361,10 +361,6 @@ throughout, with state in caller-provided arrays plus a small fixed object.
   enum — the `fromRaw` lookup that used to sit there was removed after 0.10.0 as
   public API with no caller and no reachable failure mode.
 
-## Feature flags
-
-**None** — the build always ships the full format.
-
 ## Build & test
 
 ```bash
@@ -382,6 +378,10 @@ and `Decode.errorOfChunked` feed one whole buffer and one byte at a time, and
 one table — `DecoderErrorsTest.malformedVectors()`, one row per vector, every row driven
 through both decode surfaces — so a new rejection case is a row there rather than a new
 suite.
+
+### Feature flags
+
+**None** — the build always ships the full format.
 
 ## Benchmarks
 
