@@ -384,26 +384,22 @@ loading and JIT cost.
 Five of that message's bytes are metadata and a million are payload, so its MB/s is
 this machine's memory bandwidth rather than a statement about the library — and the
 streamed row can even edge ahead of the one-shot one, because a 4 KiB window stays in
-L1 while a one-shot encode writes a megabyte out to memory. The instruction
-counts need the same care:
-
-```
-                              Ir/op        MB/s
-encode: blob 1MB one-shot   1,007,269   34,635.27
-encode: blob 1MB streaming    131,080   38,162.57
-```
-
-That eightfold gap is the JVM's array-copy strategy, not the flush path: the
-one-shot message's payload starts at offset 5 — its own header — and for a
-destination that is not 8-byte aligned the JIT's copy stub costs about one
-instruction per byte, while the streamed row copies into a fresh window at
-offset 0.
+L1 while a one-shot encode writes a megabyte out to memory. The instruction counts
+need the same care: the gap between the two is the JVM's array-copy strategy, not
+the flush path. The one-shot message's payload starts at offset 5 — its own
+header — and for a destination that is not 8-byte aligned the JIT's copy stub
+costs about one instruction per byte, while the streamed row copies into a fresh
+window at offset 0.
 
 One process, ten workloads: that costs the `decode: composite skip-all` row too.
 It shares a JVM with `decode: composite`, so the visitor call sites inside
 `IStream` see both sinks and neither row runs monomorphic — what not-decoding is
 worth shows up in Ir/op, where each workload gets its own JVM, and not in the
 MB/s pair.
+
+Measured figures are not reproduced here — they belong to the cross-language
+benchmark arena, which runs every port on one host under one methodology. This
+section says how to obtain them, not what they came out as.
 
 The exact workloads, timing rules and output grammar are specified in
 the [SofaBuffers documentation](https://github.com/sofa-buffers/documentation);
