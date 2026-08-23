@@ -57,19 +57,16 @@ is the package `org.sofabuffers.sofab`.
 | No per-field allocation | State lives in caller-provided buffers plus small `OStream` / `IStream` objects. Scalars stay primitive (`long` / `double`) — no autoboxing on the hot path. |
 | No reflection, no runtime codegen | Pure method calls; the decoder pushes to a `Visitor` interface. Suitable for GraalVM native-image and locked-down runtimes. |
 | Streaming **out** | `OStream` writes into a small caller buffer and invokes a `FlushSink` whenever it fills, so a message can exceed the buffer — and even RAM. |
-| Streaming **in** | `IStream` accepts arbitrarily small chunks; a message may split across `feed` calls at any byte boundary, and large string / blob payloads arrive in pieces. Malformed bytes throw `SofabException` (`INVALID_MSG`); running out of bytes mid-field is **not** an error — `feed` suspends and resumes on the next chunk. Call `status()` after the final `feed` to tell a `COMPLETE` message from a truncated `INCOMPLETE` one (MESSAGE_SPEC §7); it never throws and needs no finish/finalize step. A rejection is **terminal** (CORELIB_PLAN §5.2): `status()` reports `INVALID` from then on and every further `feed` rethrows `INVALID_MSG` without decoding, so a caller that catches the exception and keeps feeding cannot resume mid-stream on a message already proven malformed — `reset()` starts the next one. |
-| Sparse sequence framing, still one pass | `writeSequenceBeginLazy` holds a sequence header back until a child field is actually written, so a sequence-typed **field** that receives no content is omitted rather than framed empty (MESSAGE_SPEC §2) — decided in a single forward pass, with no sub-message buffering. Held-back ids are encoder state, not buffer content, so a tiny output buffer still produces the one-shot bytes. `writeSequenceEnd` drops such a sequence; `writeSequenceEndKeep` forces the frame out where it carries information — a wrapper-array **element** is still always framed, because its presence is what gives the array its length (§5.1). The pending run grows on demand to the full `MAX_DEPTH` (255), so the output is canonical at every legal nesting depth: no fixed window, no eager fallback (CORELIB_PLAN §6 reserves that allowance for heap-free profiles). |
+| Streaming **in** | `IStream` accepts arbitrarily small chunks; a message may split across `feed` calls at any byte boundary, and large string / blob payloads arrive in pieces. Malformed bytes throw `SofabException` (`INVALID_MSG`); running out of bytes mid-field is **not** an error — `feed` suspends and resumes on the next chunk. Call `status()` after the final `feed` to tell a `COMPLETE` message from a truncated `INCOMPLETE` one; it never throws and needs no finish/finalize step. A rejection is **terminal**: `status()` reports `INVALID` from then on and every further `feed` rethrows `INVALID_MSG` without decoding; `reset()` starts the next one. |
+| Sparse sequence framing, still one pass | `writeSequenceBeginLazy` holds a sequence header back until a child field is actually written, so a sequence-typed **field** that receives no content is omitted rather than framed empty — decided in a single forward pass, with no sub-message buffering. Held-back ids are encoder state, not buffer content, so a tiny output buffer still produces the one-shot bytes. `writeSequenceEnd` drops such a sequence; `writeSequenceEndKeep` forces the frame out, and a wrapper-array **element** is always framed. The pending run grows on demand to the full `MAX_DEPTH` (255), so the output is canonical at every legal nesting depth. |
 | Reserve-offset | `new OStream(buf, offset)` leaves room at the front for a lower-layer protocol header, saving a copy. |
 | Explicit endianness | IEEE-754 values are written / read little-endian with explicit bit shifts, so behaviour is identical on every JVM. |
 | Generated-code friendly | Every `Visitor` method has a default no-op, so sinks override only what they need. |
 
 ## Usage
 
-The codec has four use cases — serialize a message that fits in one buffer,
-serialize one too large for the buffer (streamed out in chunks), deserialize a
-whole message, and deserialize one arriving in chunks — plus the generated-code
-path that wraps them. Every encode / decode call can throw `SofabException` (which
-extends `IOException`); the snippets below elide `throws IOException`.
+Every encode / decode call can throw `SofabException` (which extends
+`IOException`); the snippets below elide `throws IOException`.
 
 ### Serialize
 
@@ -106,10 +103,9 @@ os.flush();                                         // push the tail
 ```
 
 A sink that *takes* the buffer instead of copying out of it — a zero-copy
-transport — must hand the encoder a replacement before it returns, and the cursor
-then starts at that installation's offset. That is also how a sink reserves
-framing-header room in **every** flushed unit, since the offset belongs to the
-installation and is consumed by the flush it was made in:
+transport — must install a replacement with `bufferSet` before it returns; the
+cursor then starts at that installation's offset, which is how a sink reserves
+framing-header room in **every** flushed unit:
 
 ```java
 byte[][] window = { fresh(16) };                    // fresh() reserves 3 header bytes
@@ -176,9 +172,7 @@ advances a pointer straight over the buffer; only a field, array element or
 resumable byte-at-a-time machine, and the moment that one construct completes the
 rest of the chunk goes back to the bulk path — inside an array too, not just between
 fields. A boundary anywhere in a 100 000-element array therefore costs one element,
-not the 99 999 after it, so chunked decoding runs at one-shot speed wherever the
-chunks happen to fall (`fp64` array in 4 KiB chunks: 31.6 → 0.9 ns/element). Feed
-whatever sizes your transport produces.
+not the 99 999 after it (`fp64` array in 4 KiB chunks: 31.6 → 0.9 ns/element).
 
 ### Code generator
 
@@ -187,10 +181,8 @@ emits one class per message whose whole wire surface is the family-wide name set
 `serialize(OStream)` writes the fields into a stream the caller owns, `byte[]
 encode()` wraps it over a `MAX_SIZE` buffer, `decode(byte[])` (and its
 status-returning sibling `tryDecode(byte[], out)`) wraps the decoder over one
-complete buffer, and `decoder()` hands back the streaming reader. **Both halves are
-the same code path**: the one-shot pair is a thin wrapper over the streaming one,
-which is why a message that streams and a message that fits in a buffer produce
-identical bytes.
+complete buffer, and `decoder()` hands back the streaming reader. The one-shot pair
+is a thin wrapper over the streaming one, so both produce identical bytes.
 
 A hand-written stand-in — the generator emits the visitor as its own class, folded
 into the message here for brevity — encoded, decoded, then decoded again in chunks:
@@ -261,17 +253,13 @@ boundary, `INCOMPLETE` mid-field, and malformed bytes throw (`INVALID`, terminal
 The top level has no end marker, so *the caller's* framing decides when the input is
 over; a still-`INCOMPLETE` status at that point is a truncated message. Give the
 encoder's `OStream` a `FlushSink` and the same `serialize` streams a message larger
-than the buffer, so neither direction ever needs the whole message in RAM.
+than the buffer.
 
-## Generated-code support layer
+### Generated-code support layer
 
-Around every codec call, generated code does the same few things: put an element at
-the index its id names, grow an array as elements actually arrive, reassemble a
-payload that arrived in pieces, turn validated bytes into a `String`, report a
-schema bound the wire broke. None of that is schema-specific — a `count`, a
-`maxlen` or a capacity is an argument, an element type is a type parameter — so it
-lives here instead of being emitted, with its rationale, into every generated
-package.
+Generated code leans on a schema-agnostic support layer the corelib ships rather
+than emitting its own copy into every package: a `count`, a `maxlen` or a capacity
+is an argument, an element type is a type parameter.
 
 | symbol | what it is |
 |---|---|
@@ -285,8 +273,7 @@ package.
 | `OStream.overScratch` / `copyOfBytesUsed` | a per-thread buffer for a one-shot `encode()`, so the worst case is allocated once per thread rather than once per call. The **size** stays with the caller (CORELIB_PLAN §5.1): generated code passes its own `MAX_SIZE` |
 
 These are ordinary public API, usable directly; they are simply shaped by what
-generated code needs. Older generated sources carry their own copies of some of
-them and keep working unchanged.
+generated code needs.
 
 ## Memory handling
 
@@ -299,55 +286,40 @@ throughout, with state in caller-provided arrays plus a small fixed object.
   of the *same* buffer — so a message can exceed the buffer or RAM; with no sink, a
   full buffer raises `BUFFER_FULL`. The sink's array is reused after the call
   returns, so a sink that keeps the bytes must copy them — **or take the buffer**
-  and install a replacement with `bufferSet(buf, offset)` before returning
-  (CORELIB_PLAN §5.1). Which of the two happened is stated by that call and by
-  nothing else: return without it and the encoder resumes at offset 0 in the
-  still-active buffer; install one and it resumes at *that* call's offset. **The
-  start offset belongs to the installation, not to the buffer** — it is consumed by
-  the flush it was made in, so a sink that wants framing-header room in *every* unit
-  re-arms it on each flush (passing the same array again is a new installation like
-  any other), while a `bufferSet` made outside a sink reserves room in the current
-  unit only. **`MIN_OUTPUT_BUFFER` is `1`** (`Sofab.MIN_OUTPUT_BUFFER`, CORELIB_PLAN
-  §5.1): the encoder splits every atomic unit — no varint, string run or array
-  element has to land contiguously — so one usable byte is enough, and any size at or
-  above it produces output byte-identical to the one-shot path. **It binds a buffer
-  installed *with* a sink**, at construction and at every `bufferSet`, both of which
-  reject `buf.length - offset < MIN_OUTPUT_BUFFER` with `IllegalArgumentException`
-  where the buffer is handed over — so a replacement with no room left
-  (`offset == buf.length`) fails *in that `bufferSet` call*, not at some later write.
-  A buffer installed **without** a sink is subject to no minimum: no flush can occur,
-  so it either holds the message or raises `BUFFER_FULL`, and sizing from the
-  generated `MAX_SIZE` stays exact. A field is written with as few stores as its
-  shape allows — a multi-byte varint is assembled in a register and stored eight
-  bytes at a time, a one-byte header and one-byte value go out as a single two-byte
-  store, and a whole `fp32` field (header, `fixlen_word` and payload) as a single
-  eight-byte one — so a store may reach past the field it wrote and the encoder may
-  leave up to **seven scratch bytes** in the buffer just past the write position; they are
-  never part of the message, sit strictly between `bytesUsed()` and the end of the
-  buffer, are overwritten by the next write, and are never flushed — read back only
-  `[0, bytesUsed())`. Bytes before the starting `offset` reserved for a lower-layer
-  header are never touched, and a buffer with fewer than ten bytes free falls back to
-  the byte-at-a-time path, so small buffers see no scratch writes at all.
-  (`writeString` encodes
-  UTF-8 **directly into the buffer**, with no intermediate `byte[]`.) String
-  encoding is **always strict** UTF-8 (MESSAGE_SPEC §8): a `String` is a Unicode
+  and install a replacement with `bufferSet(buf, offset)` before returning.
+  **The start offset belongs to the installation, not to the buffer**: return
+  without `bufferSet` and the encoder resumes at offset 0 in the still-active
+  buffer; install one and it resumes at *that* call's offset, so a sink that wants
+  framing-header room in *every* unit re-arms it on each flush. **`MIN_OUTPUT_BUFFER`
+  is `1`** (`Sofab.MIN_OUTPUT_BUFFER`): the encoder splits every atomic unit — no
+  varint, string run or array element has to land contiguously — so one usable byte
+  is enough, and any size at or above it produces output byte-identical to the
+  one-shot path. **It binds a buffer installed *with* a sink**, at construction and
+  at every `bufferSet`, both of which reject a buffer with
+  `buf.length - offset < MIN_OUTPUT_BUFFER` — an `IllegalArgumentException` raised
+  where the buffer is handed over, never partway through a message. A buffer installed **without** a sink is subject to no minimum: it either
+  holds the message or raises `BUFFER_FULL`, and sizing from the generated
+  `MAX_SIZE` stays exact. The encoder may leave up to **seven scratch bytes** in the
+  buffer just past the write position; they are never part of the message, sit
+  strictly between `bytesUsed()` and the end of the buffer, are overwritten by the
+  next write, and are never flushed — read back only `[0, bytesUsed())`. Bytes
+  before the starting `offset` reserved for a lower-layer header are never touched,
+  and a buffer with fewer than ten bytes free sees no scratch writes at all.
+  (`writeString` encodes UTF-8 **directly into the buffer**, with no intermediate
+  `byte[]`.) String encoding is **always strict** UTF-8: a `String` is a Unicode
   string type, so the only value it cannot represent as well-formed UTF-8 is an
-  unpaired UTF-16 surrogate; `writeString` rejects such a string with
+  unpaired UTF-16 surrogate, and `writeString` rejects such a string with
   `SofabException` (`ARGUMENT`) **before** emitting any bytes, never lossily
   substituting a replacement character. There is no strict mode to toggle. The
-  same rule binds the **byte-container** entry point: `writeFixlen(id, data, from,
-  length, FixlenType.STRING)` takes raw bytes, so it validates that range with
-  `Utf8.valid` and refuses a malformed payload with `ARGUMENT`, again before a
-  byte is written — this API cannot emit a string the family's own decoders would
-  reject. `FixlenType.BLOB` is the type for opaque bytes and is never validated,
-  so the other fixlen writers (`writeBlob`, `writeFp32/64`) pay only one enum
-  comparison. On the decode side the check lives in generated code too, and it is
-  the **same validator**: once the declared payload is complete, generated code
-  runs `Utf8.valid` over the assembled bytes and raises `INVALID_MSG` if they are
-  malformed — a multi-byte sequence merely split across two chunks is still
-  arriving, not invalid. The corelib itself never validates a payload it only
-  streams, which is what makes a *skipped* string a pure length jump with no
-  per-byte work (§6.4).
+  byte-container entry point `writeFixlen(id, data, from, length,
+  FixlenType.STRING)` takes raw bytes, so it validates that range with `Utf8.valid`
+  and refuses a malformed payload with `ARGUMENT`, again before a byte is written.
+  `FixlenType.BLOB` is the type for opaque bytes and is never validated. On the
+  decode side the check lives in generated code and is the **same validator**: once
+  the declared payload is complete, generated code runs `Utf8.valid` over the
+  assembled bytes and raises `INVALID_MSG` if they are malformed. The corelib itself
+  never validates a payload it only streams, so a *skipped* string is a pure length
+  jump with no per-byte work.
 - **Decode (`IStream` + `Visitor`).** `feed` runs a cursor over the caller's input
   `byte[]`, **aliasing** it. Scalars and floats are passed **by value** (`long` /
   `double`); strings and blobs are handed to the visitor as a **window** (`data`,
@@ -357,13 +329,7 @@ throughout, with state in caller-provided arrays plus a small fixed object.
   the writers take one of its constants and `raw()` turns it into the wire tag, while
   the decoder narrows an incoming tag itself — rejecting the reserved values
   `0x4..0x7` in the single check that every site reading a `fixlen_word` runs — and
-  hands the visitor the matching constant. There is deliberately no tag-to-constant entry point on the
-  enum — the `fromRaw` lookup that used to sit there was removed after 0.10.0 as
-  public API with no caller and no reachable failure mode.
-
-## Feature flags
-
-**None** — the build always ships the full format.
+  hands the visitor the matching constant.
 
 ## Build & test
 
@@ -372,16 +338,14 @@ mvn -B verify          # compile, run the JUnit suite, and produce JaCoCo covera
 mvn -B test            # tests only
 ```
 
-`verify` runs every suite — including the shared conformance vectors — and writes a
-JaCoCo report to `target/site/jacoco/`; CI publishes that report as the coverage
-and branches badges above. The suites live in
-`src/test/java/org/sofabuffers/sofab/`, and the helpers they share live once in
-`.../sofab/common/`: `Wire.bytes` / `Wire.concat` build a wire vector, `Decode.errorOf`
-and `Decode.errorOfChunked` feed one whole buffer and one byte at a time, and
-`Decode.verdict` reduces a decode to accept / incomplete / rejected. Malformed input is
-one table — `DecoderErrorsTest.malformedVectors()`, one row per vector, every row driven
-through both decode surfaces — so a new rejection case is a row there rather than a new
-suite.
+`verify` runs every suite — including the shared conformance vectors from
+`assets/` — and writes a JaCoCo report to `target/site/jacoco/`; CI publishes that
+report as the coverage and branches badges above. The suites live in
+`src/test/java/org/sofabuffers/sofab/`.
+
+### Feature flags
+
+**None** — the build always ships the full format.
 
 ## Benchmarks
 
@@ -412,40 +376,30 @@ the blob and 956 for the composite.
 `bench/run_callgrind.sh` (needs `valgrind`, which the `.devcontainer/` image
 installs) reports **instructions retired per op** (Ir/op) under Callgrind —
 deterministic and independent of clock speed and scheduler, so the numbers compare
-across machines and against the sibling ports, and each workload gets a JVM of its
-own. There is no JIT-compiled `run_<workload>` symbol to toggle collection on, so —
-like the Python and TypeScript ports — it runs each workload at two rep counts and
-subtracts, which cancels JVM startup, class loading and JIT cost exactly (the warmup
-is fixed per workload and clears the pinned compile threshold, so what is subtracted
-is steady compiled code, not the interpreter).
+across machines and against the sibling ports. Each workload gets a JVM of its own
+and is run at two rep counts and subtracted, which cancels JVM startup, class
+loading and JIT cost.
 
 **Read the two `blob 1MB` encode rows against each other, not against the rest.**
 Five of that message's bytes are metadata and a million are payload, so its MB/s is
 this machine's memory bandwidth rather than a statement about the library — and the
 streamed row can even edge ahead of the one-shot one, because a 4 KiB window stays in
-L1 while a one-shot encode writes a megabyte out to memory. On this port the
-instruction counts must be read with the same care:
-
-```
-                              Ir/op        MB/s
-encode: blob 1MB one-shot   1,007,269   34,635.27
-encode: blob 1MB streaming    131,080   38,162.57
-```
-
-That eightfold gap is the JVM's array-copy strategy, not the flush path. The one-shot
-message's payload starts at offset 5 — its own header — and for a destination that is
-not 8-byte aligned the JIT's copy stub takes a path Callgrind counts at about one
-instruction per byte: a bare `System.arraycopy` of a megabyte on this JVM costs
-285,820 Ir to offset 0 and 1,001,143 Ir to offset 5. The streamed row copies into a
-fresh window at offset 0, 245 times, for 131,080 Ir — of which a bare 245 × 4096-byte
-copy is 88,012, so ~43,000 Ir/op, about 175 per flush, is what the divisible-run path
-actually costs here.
+L1 while a one-shot encode writes a megabyte out to memory. The instruction counts
+need the same care: the gap between the two is the JVM's array-copy strategy, not
+the flush path. The one-shot message's payload starts at offset 5 — its own
+header — and for a destination that is not 8-byte aligned the JIT's copy stub
+costs about one instruction per byte, while the streamed row copies into a fresh
+window at offset 0.
 
 One process, ten workloads: that costs the `decode: composite skip-all` row too.
 It shares a JVM with `decode: composite`, so the visitor call sites inside
 `IStream` see both sinks and neither row runs monomorphic — what not-decoding is
-worth shows up in Ir/op, where each workload gets its own JVM (8,885 against
-9,128), and not in the MB/s pair.
+worth shows up in Ir/op, where each workload gets its own JVM, and not in the
+MB/s pair.
+
+Measured figures are not reproduced here — they belong to the cross-language
+benchmark arena, which runs every port on one host under one methodology. This
+section says how to obtain them, not what they came out as.
 
 The exact workloads, timing rules and output grammar are specified in
 the [SofaBuffers documentation](https://github.com/sofa-buffers/documentation);

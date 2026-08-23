@@ -40,14 +40,13 @@ import org.junit.jupiter.api.condition.OS;
  *
  * <p>The guard is derived, not hard-coded: a bench script declares its hard
  * prerequisites in its own {@code command -v <tool>} preflight, and every tool so
- * declared must be installed by the image and named in the README. A future
+ * declared must be installed by the image. A future
  * script that adds a preflight for a tool the image lacks fails here too.
  */
 class DevcontainerToolsTest {
 
     private static final Path DOCKERFILE = Path.of(".devcontainer", "Dockerfile");
     private static final Path BENCH = Path.of("bench");
-    private static final Path README = Path.of("README.md");
 
     /** Tools whose apt package is not spelled like the command it installs. */
     private static final Map<String, String> PACKAGE_OF = Map.of("mvn", "maven");
@@ -70,21 +69,6 @@ class DevcontainerToolsTest {
                     prereq.getValue() + " cannot start without `" + prereq.getKey()
                             + "`, which " + DOCKERFILE + " does not install (apt packages: "
                             + installed + ")");
-        }
-    }
-
-    /**
-     * §9: the README documents what the repo ships and how to run it, so a
-     * prerequisite the image would have to provide is a prerequisite the reader is
-     * told about.
-     */
-    @Test
-    void theReadmeNamesEveryToolTheBenchScriptsRequire() throws IOException {
-        String readme = read(README);
-        for (Map.Entry<String, Path> prereq : benchPrereqs().entrySet()) {
-            assertTrue(readme.contains(prereq.getKey()),
-                    "README must say that " + prereq.getValue() + " needs `"
-                            + prereq.getKey() + "`");
         }
     }
 

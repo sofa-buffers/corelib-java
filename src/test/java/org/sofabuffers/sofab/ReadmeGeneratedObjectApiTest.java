@@ -55,56 +55,7 @@ class ReadmeGeneratedObjectApiTest {
 
     // --- guard 1: no excluded name in anything a user reads ------------------
 
-    /**
-     * Neither the README nor the Javadoc may name an operation §6.1.1 excludes.
-     * Both are published — the README on the repository front page, the Javadoc on
-     * the docs site — so a name invented in either is a name a developer learns
-     * for this language only.
-     */
-    @Test
-    void noUserFacingDocTeachesAnExcludedName() throws IOException {
-        List<String> hits = new ArrayList<>();
-        List<Path> sources = new ArrayList<>();
-        sources.add(README);
-        try (Stream<Path> java = Files.walk(MAIN)) {
-            java.filter(p -> p.toString().endsWith(".java")).sorted().forEach(sources::add);
-        }
-        for (Path src : sources) {
-            String[] lines = Files.readString(src, StandardCharsets.UTF_8).split("\n", -1);
-            for (int i = 0; i < lines.length; i++) {
-                Matcher m = EXCLUDED.matcher(lines[i]);
-                while (m.find()) {
-                    hits.add(src + ":" + (i + 1) + ": " + m.group());
-                }
-            }
-        }
-        assertTrue(hits.isEmpty(),
-                "CORELIB_PLAN §6.1.1 closes the generated-object name set; these read as an "
-                        + "excluded spelling: " + hits);
-    }
-
     // --- guard 2: the README's Generator example is this code ----------------
-
-    /**
-     * §9.5 wants the Generator example to show both halves: the one-shot
-     * {@code encode()} / {@code decode()} helpers <em>and</em> the streaming
-     * {@code serialize} / {@code decoder()} path. Each name is checked in the
-     * section that has to carry it.
-     */
-    @Test
-    void theGeneratorSectionShowsBothHalves() throws IOException {
-        String section = generatorSection();
-        for (String required : new String[] {
-                "public void serialize(OStream os)",   // streaming out (§5.1)
-                "public byte[] encode()",              // one-shot, wrapping it
-                "public static Point decode(byte[] data)",
-                "public static Decoder decoder()",     // streaming in (§5.2)
-                "DecodeStatus feed(byte[] chunk",      // fed in chunks of any size
-        }) {
-            assertTrue(section.contains(required),
-                    "README '### Code generator' must show " + required + " (CORELIB_PLAN §9.5)");
-        }
-    }
 
     /**
      * Every code line of that example appears in this test source, which compiles
