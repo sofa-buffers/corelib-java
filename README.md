@@ -29,14 +29,14 @@ over the field id. The wire format is specified language-neutrally in the
 
 ### Package name
 
-Maven coordinates `org.sofabuffers:corelib` (version `0.10.0`); the import namespace
+Maven coordinates `org.sofabuffers:corelib` (version `0.11.0`); the import namespace
 is the package `org.sofabuffers.sofab`.
 
 ```xml
 <dependency>
   <groupId>org.sofabuffers</groupId>
   <artifactId>corelib</artifactId>
-  <version>0.10.0</version>
+  <version>0.11.0</version>
 </dependency>
 ```
 
@@ -277,8 +277,24 @@ generated code needs.
 
 ## Memory handling
 
-The library never allocates the payload buffer; the API is `byte[]`-based
-throughout, with state in caller-provided arrays plus a small fixed object.
+**No wire value decides an allocation in the codec.** `OStream` and `IStream`
+allocate exactly once, in their constructors: the object itself and its
+fixed-size working state — the eight-byte landing zone for a float split across
+feeds, and the `MAX_DEPTH`-wide run of held-back sequence headers (1032 bytes per
+encoder). Every size comes from a constant of the format, never from a count or
+a length on the wire. After construction `write`, `feed` and `flush` allocate
+nothing at all, and there is no library-owned accumulator for a chunk-straddling
+field: each piece is passed through to the visitor as it arrives.
+`AllocationFreeTest` measures it. Holding one encoder or decoder and re-arming it
+with `reset` costs that construction once instead of once per message; the
+one-shot `OStream.overScratch` helper already keeps one per thread.
+
+The storage every decoded field lands in comes from the caller — the destination
+a visitor hands back, or the visitor's own fields. The library ships a **static
+helper layer** beside the codec (`Seq`, `PayloadAcc`, `Utf8`, `OStream.overScratch`,
+listed under *Generated-code support layer* above): that layer **does** allocate,
+on the generated layer's behalf and with sizes the generated layer supplies, and
+it is not part of the codec.
 
 - **Encode (`OStream`).** The caller owns and sizes the output `byte[]`; the encoder
   writes straight in with an advancing cursor and **never grows it**. When the buffer
@@ -299,7 +315,10 @@ throughout, with state in caller-provided arrays plus a small fixed object.
   `buf.length - offset < MIN_OUTPUT_BUFFER` — an `IllegalArgumentException` raised
   where the buffer is handed over, never partway through a message. A buffer installed **without** a sink is subject to no minimum: it either
   holds the message or raises `BUFFER_FULL`, and sizing from the generated
-  `MAX_SIZE` stays exact. The encoder may leave up to **seven scratch bytes** in the
+  `MAX_SIZE` stays exact. **A sink is only ever handed memory inside the installed
+  buffer** — the `data` argument is that array itself and `[offset, offset+length)`
+  a range within it. A long payload is never passed through straight from the
+  caller's own array, whatever its size. The encoder may leave up to **seven scratch bytes** in the
   buffer just past the write position; they are never part of the message, sit
   strictly between `bytesUsed()` and the end of the buffer, are overwritten by the
   next write, and are never flushed — read back only `[0, bytesUsed())`. Bytes
@@ -320,12 +339,18 @@ throughout, with state in caller-provided arrays plus a small fixed object.
   assembled bytes and raises `INVALID_MSG` if they are malformed. The corelib itself
   never validates a payload it only streams, so a *skipped* string is a pure length
   jump with no per-byte work.
-- **Decode (`IStream` + `Visitor`).** `feed` runs a cursor over the caller's input
-  `byte[]`, **aliasing** it. Scalars and floats are passed **by value** (`long` /
-  `double`); strings and blobs are handed to the visitor as a **window** (`data`,
-  `chunkOffset`, `chunkLength`) into that array, valid **only for the duration of the
-  callback** — no `String` or fresh `byte[]` is constructed, so a visitor that
-  retains bytes must copy the range itself. `FixlenType` travels **outwards only**:
+- **Decode (`IStream` + `Visitor`).** The caller owns the input bytes, and must keep
+  them alive only **for the duration of the `feed` call**: `feed` runs a cursor over
+  the array and copies nothing out of it, so the moment it returns the caller may
+  reuse, overwrite or drop that chunk. **Nothing outlives the callback.** Values
+  reach the caller by the second of the two routes the format allows — passed
+  *through* the callback rather than written into storage the library holds: scalars
+  and floats **by value** (`long` / `double`), strings and blobs as a **window**
+  (`data`, `chunkOffset`, `chunkLength`) into the caller's own array, valid **only
+  until the callback returns** — no `String` or fresh `byte[]` is constructed, so a
+  visitor that retains bytes copies the range itself. This holds on the one-shot
+  path exactly as on the streaming one: there is no position to read a payload back
+  from afterwards, and no value that stays valid until the next `feed`. `FixlenType` travels **outwards only**:
   the writers take one of its constants and `raw()` turns it into the wire tag, while
   the decoder narrows an incoming tag itself — rejecting the reserved values
   `0x4..0x7` in the single check that every site reading a `fixlen_word` runs — and
