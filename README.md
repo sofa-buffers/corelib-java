@@ -29,14 +29,14 @@ over the field id. The wire format is specified language-neutrally in the
 
 ### Package name
 
-Maven coordinates `org.sofabuffers:corelib` (version `0.10.0`); the import namespace
+Maven coordinates `org.sofabuffers:corelib` (version `0.11.0`); the import namespace
 is the package `org.sofabuffers.sofab`.
 
 ```xml
 <dependency>
   <groupId>org.sofabuffers</groupId>
   <artifactId>corelib</artifactId>
-  <version>0.10.0</version>
+  <version>0.11.0</version>
 </dependency>
 ```
 

@@ -12,12 +12,16 @@
        is what Maven admits) plus artifactId corelib. The normative half is the
        namespace, and every symbol is under org.sofabuffers.sofab. -->
   <artifactId>corelib</artifactId>
-  <!-- 0.9.0: source-breaking. writeSequenceBegin was removed in favour of the
-       writeSequenceBeginLazy / writeSequenceEnd / writeSequenceEndKeep trio, and
-       the public LAZY_SEQ_DEPTH constant is gone. Pre-1.0, the minor is where a
-       breaking change lands. Sofab.API_VERSION is the WIRE contract and stays 1:
-       the bytes are unchanged, only which of them a sparse encoder emits. -->
-  <version>0.10.0</version>
+  <!-- 0.11.0: behaviour-breaking, not source-breaking. OStream.overScratch now
+       hands a thread the same OStream instance at every call, re-armed, instead of
+       a new one over the shared buffer - so two overScratch streams held at once
+       on one thread are now one stream, where before they were two over one
+       buffer. Both were already documented as valid only until the same thread
+       asks again. Pre-1.0, the minor is where a breaking change lands.
+       Sofab.API_VERSION is the WIRE contract and stays 1: the bytes are
+       unchanged. (0.9.0 removed writeSequenceBegin in favour of the
+       writeSequenceBeginLazy / writeSequenceEnd / writeSequenceEndKeep trio.) -->
+  <version>0.11.0</version>
   <packaging>jar</packaging>
 
   <name>SofaBuffers CoreLib (Java)</name>
