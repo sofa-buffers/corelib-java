@@ -184,6 +184,16 @@ public final class OStream {
     private static final ThreadLocal<byte[]> SCRATCH = new ThreadLocal<>();
 
     /**
+     * The per-thread encoder {@link #overScratch} hands out, re-armed onto
+     * {@link #SCRATCH} at every call. An encoder is a fixed-size object — the
+     * {@code MAX_DEPTH}-wide {@link #pending} run included (§6.6) — so building one
+     * per one-shot {@code encode()} would allocate a kilobyte per message for state
+     * the previous message has finished with. Reuse and the scratch buffer have the
+     * same lifetime rule and the same hazard, stated once in {@link #overScratch}.
+     */
+    private static final ThreadLocal<OStream> SCRATCH_STREAM = new ThreadLocal<>();
+
+    /**
      * Create an encoder over {@code buffer} with no flush sink. Writing past the
      * end of the buffer raises {@link SofabError#BUFFER_FULL}.
      *
@@ -278,13 +288,15 @@ public final class OStream {
      * stream may be over a <em>longer</em> array than requested; bound the message
      * by its own {@code MAX_SIZE} rather than by the buffer's length.
      *
-     * <p>The buffer is <b>reused, not owned</b>: everything written into it is
-     * valid only until the same thread calls this again. Take the bytes out with
-     * {@link #copyOfBytesUsed()} before that happens, and do not call it
+     * <p>The buffer <b>and the encoder over it</b> are <b>reused, not owned</b>:
+     * everything written into the buffer is valid only until the same thread calls
+     * this again, and this method hands that thread the same {@code OStream} object
+     * every time, re-armed at offset 0. Take the bytes out with
+     * {@link #copyOfBytesUsed()} before the next call, and do not call it
      * re-entrantly — an {@code encode()} reached from inside another message's
-     * {@code serialize} on the same thread overwrites the outer one's bytes.
-     * A caller that needs to hold the buffer hands in its own with
-     * {@link #OStream(byte[])} instead.
+     * {@code serialize} on the same thread overwrites the outer one's bytes, and now
+     * its cursor with them. A caller that needs to hold either hands in its own
+     * buffer with {@link #OStream(byte[])} instead.
      *
      * <p>The stream has no {@link FlushSink}: a scratch buffer sized to hold the
      * whole message has nowhere to flush to, and a message that outgrows it raises
@@ -305,7 +317,17 @@ public final class OStream {
             buf = new byte[size];
             SCRATCH.set(buf);
         }
-        return new OStream(buf);
+        OStream os = SCRATCH_STREAM.get();
+        if (os == null) {
+            os = new OStream(buf);
+            SCRATCH_STREAM.set(os);
+        } else {
+            // Re-arm onto the tracked scratch buffer rather than whatever buffer the
+            // previous holder may have installed, and clear the depth and hold-back
+            // state an abandoned encode can leave behind.
+            os.reset(buf);
+        }
+        return os;
     }
 
     /**
