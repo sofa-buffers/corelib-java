@@ -5,7 +5,12 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>org.sofabuffers</groupId>
-  <!-- Registry/artifact coordinate is org.sofabuffers:corelib (§6); the Java namespace stays org.sofabuffers.sofab. -->
+  <!-- CORELIB_PLAN §6: the registry name is derived, not a fixed string - the
+       organization slug `sofa-buffers` and the word `corelib`, written in the
+       registry's own convention. Maven Central has no single package name, so the
+       coordinate is groupId org.sofabuffers (the slug as a reverse-DNS group, which
+       is what Maven admits) plus artifactId corelib. The normative half is the
+       namespace, and every symbol is under org.sofabuffers.sofab. -->
   <artifactId>corelib</artifactId>
   <!-- 0.9.0: source-breaking. writeSequenceBegin was removed in favour of the
        writeSequenceBeginLazy / writeSequenceEnd / writeSequenceEndKeep trio, and
