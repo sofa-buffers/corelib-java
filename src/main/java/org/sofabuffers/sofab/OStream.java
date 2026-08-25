@@ -85,13 +85,16 @@ import static org.sofabuffers.sofab.WireFormat.zigzagEncode;
 public final class OStream {
 
     /**
-     * Initial capacity of the held-back-header run. It is a starting size, not a
-     * limit: the run grows on demand and can reach {@link Sofab#MAX_DEPTH}, which
-     * is what makes this encoder canonical at every legal nesting depth
-     * (CORELIB_PLAN §6, "How deep the hold-back reaches" — only a heap-free
-     * profile may bound the run and frame eagerly beyond it).
+     * Slots in the held-back-header run's overflow array — every nesting level
+     * except the outermost, which {@link #pending0} holds as a scalar. It is a
+     * fixed size, not a starting one: the run reaches the full
+     * {@link Sofab#MAX_DEPTH}, which is what makes this encoder canonical at every
+     * legal nesting depth (CORELIB_PLAN §6.0.1, "How deep the hold-back reaches" —
+     * only a constrained profile may bound the run and frame eagerly beyond it),
+     * and CORELIB_PLAN §6.6 requires that bounded state to be sized at
+     * construction rather than grown on a {@code write} path.
      */
-    private static final int PENDING_INITIAL = 8;
+    private static final int PENDING_SLOTS = Sofab.MAX_DEPTH - 1;
 
     /**
      * Little-endian views over a {@code byte[]}. A float payload — and the
@@ -154,17 +157,20 @@ public final class OStream {
      * field commits the whole run at once, and there is no other way to leave it;
      * the invariant therefore holds by construction.
      *
-     * <p>Allocated on the first {@link #writeSequenceBeginLazy(int)} — an encoder
-     * that never opens a sequence pays nothing for it — and grown on demand, so
-     * the hold-back reaches the full {@link Sofab#MAX_DEPTH}.
+     * <p><b>Sized at construction</b> to {@link #PENDING_SLOTS}, never afterwards.
+     * CORELIB_PLAN §6.0.1 names this run as fixed-size state — "at most
+     * {@code MAX_DEPTH} ids, sized at construction" — and §6.6 forbids growing it
+     * on a {@code write} path even though {@code MAX_DEPTH}, not the wire, is what
+     * bounds it. The hold-back therefore reaches the full {@link Sofab#MAX_DEPTH}
+     * with no allocation after setup.
      */
-    private int[] pending;
+    private final int[] pending = new int[PENDING_SLOTS];
 
     /**
      * The outermost held-back id, kept out of {@link #pending} so that a stream
-     * whose sequences never nest — much the commonest shape — holds one back
-     * without allocating an array at all. {@link #pending} carries entries two and
-     * beyond, and is still allocated only if that depth is reached.
+     * whose sequences never nest — much the commonest shape — reads and writes a
+     * scalar rather than touching the array at all. {@link #pending} carries
+     * entries two and beyond.
      */
     private int pending0;
 
@@ -216,6 +222,8 @@ public final class OStream {
      *                                  usable bytes
      */
     public OStream(byte[] buffer, int offset, FlushSink sink) {
+        // The one moment an encoder allocates (CORELIB_PLAN §6.6): this object and
+        // its fixed-size `pending` run. write/flush allocate nothing.
         checkHandover(buffer, offset, sink);
         this.buffer = buffer;
         this.end = buffer.length;
@@ -389,9 +397,9 @@ public final class OStream {
      * to it — three bytes instead of two for one open sequence, and 498 instead of
      * four at {@link Sofab#MAX_DEPTH}.
      *
-     * <p>The {@link #pending} array keeps its allocation: retaining it is the point
-     * of reuse, and it is never read while {@link #nPending} is zero, which is
-     * cleared here. Everything else this class declares is restored, and
+     * <p>The {@link #pending} array keeps its allocation — it is sized once at
+     * construction and never re-made — and it is never read while
+     * {@link #nPending} is zero, which is cleared here. Everything else this class declares is restored, and
      * {@code ResetCoversEveryFieldTest} holds that to every field added later.
      *
      * @param buffer caller-owned output buffer (length &gt; 0)
@@ -1363,16 +1371,10 @@ public final class OStream {
             pending0 = id;
             nPending = 1;
         } else {
-            int slot = nPending - 1; // pending[] carries entries two and beyond
-            if (pending == null) {
-                pending = new int[PENDING_INITIAL];
-            } else if (slot == pending.length) {
-                // Grow rather than fall back to eager framing. nPending <= depth <
-                // MAX_DEPTH, so the run can never need more than MAX_DEPTH slots.
-                int grown = Math.min(pending.length * 2, Sofab.MAX_DEPTH);
-                pending = Arrays.copyOf(pending, grown);
-            }
-            pending[slot] = id;
+            // pending[] carries entries two and beyond, and is sized for all of
+            // them at construction (§6.6): the depth check above already bounded
+            // nPending by MAX_DEPTH, so the slot is always in range.
+            pending[nPending - 1] = id;
             nPending++;
         }
         depth++;

@@ -180,11 +180,14 @@ public final class IStream {
     private int fixlenTotal;
     private int fixlenRemaining;
     /**
-     * Carry buffer for a float payload split across feeds. Allocated on first
-     * use: a decode whose fp32/fp64 values never straddle a chunk boundary — the
-     * whole-message case — never allocates it at all.
+     * Carry buffer for a float payload split across feeds. Eight bytes — the
+     * widest fixlen value — <b>sized at construction</b>, never afterwards:
+     * CORELIB_PLAN §6.6 permits this landing zone as bounded working state
+     * precisely because a constant of that document caps it, and requires it to
+     * be sized "to its full extent when the codec is constructed", so no
+     * allocation happens on a {@code feed} path.
      */
-    private byte[] acc;
+    private final byte[] acc = new byte[8];
     private int accLen;
 
     /**
@@ -237,7 +240,13 @@ public final class IStream {
      */
     long machineBytes;
 
-    /** Create a fresh decoder ready to accept a new message. */
+    /**
+     * Create a fresh decoder ready to accept a new message.
+     *
+     * <p>This is the one moment a decoder allocates (CORELIB_PLAN §6.6): the
+     * object itself and the eight-byte {@link #acc} landing zone. {@link #feed}
+     * and everything it reaches allocate nothing.
+     */
     public IStream() {
     }
 
@@ -256,8 +265,9 @@ public final class IStream {
      * is terminal (CORELIB_PLAN §5.2), so until this call {@link #status()} keeps
      * answering {@link DecodeStatus#INVALID} and {@link #feed} keeps refusing bytes.
      *
-     * <p>{@link #acc} keeps its allocation: retaining it is the point of reuse, and
-     * only its first {@code accLen} bytes are ever read, which is zeroed here.
+     * <p>{@link #acc} keeps its allocation — it is sized once at construction and
+     * never re-made — and only its first {@code accLen} bytes are ever read,
+     * which is zeroed here.
      * Everything else this class declares is restored, and
      * {@code ResetCoversEveryFieldTest} holds that to every field added later.
      */
@@ -1610,10 +1620,7 @@ public final class IStream {
      * case, with nothing left over to reject.
      */
     private void stepFixlenVal(int b, Visitor visitor) {
-        byte[] a = acc;
-        if (a == null) {
-            a = acc = new byte[8]; // first straddling float on this stream
-        }
+        byte[] a = acc; // sized at construction (§6.6): nothing to allocate here
         a[accLen++] = (byte) b;
         fixlenRemaining--;
         if (fixlenRemaining != 0) {
