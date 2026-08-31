@@ -19,12 +19,15 @@ import java.util.Arrays;
  * and its code has the same shape for every schema, so it lives here rather than
  * being emitted into every generated package (generator#345).
  *
- * <p>Hold one per visitor and pass the callback's arguments straight through; the
+ * <p>Hold one per visitor and pass the callback's arguments straight through,
+ * followed by the bound that governs the destination they are headed for; the
  * value comes back on the chunk that completes it, and {@code null} before that:
  *
  * <pre>{@code
+ * private static final Bound STRING_CAP = Bound.receiver(MAX_DYN_STRING_LEN);
+ *
  * public void string(int id, int total, int offset, byte[] data, int co, int cl) {
- *     String s = acc.string(total, offset, data, co, cl);
+ *     String s = acc.string(total, offset, data, co, cl, STRING_CAP);
  *     if (s == null) {
  *         return;                  // more chunks to come
  *     }
@@ -37,11 +40,41 @@ import java.util.Arrays;
  * input array, so an accumulator that is never needed never allocates one byte.
  *
  * <p><b>{@code total} is not an allocation.</b> The announced length is the wire's
- * claim, bounded by nothing this class knows about, so the buffer grows by
- * doubling against bytes that have actually arrived. A caller with a schema
- * {@code maxlen} or a receiver limit rejects an oversized {@code total} before the
- * first chunk reaches here (MESSAGE_SPEC §7.1); a caller without one still cannot
- * be made to allocate more than the peer actually sent.
+ * claim, so the buffer grows by doubling against bytes that have actually
+ * arrived: even a caller whose field the schema bounds, and who therefore hands
+ * over no receiver cap, cannot be made to allocate more than the peer actually
+ * sent.
+ *
+ * <p><b>The receiver cap is compared here (CORELIB_PLAN §6.2.1).</b> Both methods
+ * take a {@link Bound} and test the announced {@code total} against it at the top,
+ * before the payload is buffered or materialized — §6.2.1's enforcement point, "at
+ * the count/length header, before the allocation it is meant to prevent". A breach
+ * is {@link Sofab#limitExceeded}: the bytes are well-formed and this receiver
+ * declines to hold that much, so it is a policy rejection and never
+ * {@link SofabError#INVALID_MSG}.
+ *
+ * <p><b>The two answers are not one number.</b> {@link Bound#receiver(long)} states
+ * the deployment's cap and {@link Bound#SCHEMA_BOUNDED} states that the schema's
+ * {@code maxlen} governs instead — a distinct value carrying no number, so a caller
+ * that forgot to configure a cap cannot arrive here spelling the same thing a
+ * schema-bounded field spells. A missing bound is {@link Sofab#argument}, never
+ * silently uncapped.
+ *
+ * <p><b>The number is the caller's.</b> §6.2.1 fixes the provenance of a receiver
+ * limit — it comes from generated code, which knows the schema and the target —
+ * but leaves the site of the comparison open: "A corelib MAY take a limit as an
+ * argument and perform the check itself, and a port that does is conformant."
+ * This class does. Nothing here holds a limit, defaults one, keeps one past the
+ * call it was given for, or clamps to one, and a caller that passes the cap here
+ * does <b>not</b> also guard in front of the call — one implementation, wherever
+ * it runs. Where the schema bounds the field there is no receiver cap to pass:
+ * see {@link Bound#SCHEMA_BOUNDED}.
+ *
+ * <p><b>A skipped field is never capped.</b> The check sits behind the decoder's
+ * wire-type dispatch and behind the caller's own destination switch, so a field
+ * whose wire type contradicts the declared one (MESSAGE_SPEC §7.3), or one this
+ * message does not read at all, never reaches an accumulator and never meets a
+ * cap.
  *
  * <p><b>No re-arming step.</b> Every payload's first chunk is reported at offset
  * 0, and that is where the buffer is emptied — so an accumulator still holding the
@@ -80,12 +113,24 @@ public final class PayloadAcc {
      * @param data        backing array containing the chunk
      * @param chunkOffset start of the chunk within {@code data}
      * @param chunkLength number of bytes in the chunk
+     * @param bound       {@link Bound#receiver(long)} carrying the caller's
+     *                    {@code max_dyn_string_len} (§6.2.1) for a schema-unbounded
+     *                    field, or {@link Bound#SCHEMA_BOUNDED} where the schema's
+     *                    {@code maxlen} governs instead — which is neither
+     *                    "unlimited" nor a cap left unstated
      * @return the completed string, or null if the payload is still incomplete
-     * @throws java.io.UncheckedIOException wrapping an {@code INVALID_MSG}
-     *                                      {@link SofabException} when the
+     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
+     *                                      {@link SofabException} when
+     *                                      {@code total} exceeds the receiver cap,
+     *                                      an {@code ARGUMENT} one when
+     *                                      {@code bound} is null, or an
+     *                                      {@code INVALID_MSG} one when the
      *                                      completed payload is not valid UTF-8
      */
-    public String string(int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
+    public String string(int total, int offset, byte[] data, int chunkOffset, int chunkLength, Bound bound) {
+        if (Bound.required(bound, "max_dyn_string_len").exceededBy(total)) {
+            throw overCap("string length", total, bound);
+        }
         if (offset == 0 && chunkLength >= total) {
             return Utf8.decode(data, chunkOffset, total);
         }
@@ -109,9 +154,22 @@ public final class PayloadAcc {
      * @param data        backing array containing the chunk
      * @param chunkOffset start of the chunk within {@code data}
      * @param chunkLength number of bytes in the chunk
+     * @param bound       {@link Bound#receiver(long)} carrying the caller's
+     *                    {@code max_dyn_blob_len} (§6.2.1) for a schema-unbounded
+     *                    field, or {@link Bound#SCHEMA_BOUNDED} where the schema's
+     *                    {@code maxlen} governs instead. A {@code blob} and a
+     *                    {@code string} are separate limits.
      * @return the completed payload, or null if it is still incomplete
+     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
+     *                                      {@link SofabException} when
+     *                                      {@code total} exceeds the receiver cap,
+     *                                      or an {@code ARGUMENT} one when
+     *                                      {@code bound} is null
      */
-    public byte[] blob(int total, int offset, byte[] data, int chunkOffset, int chunkLength) {
+    public byte[] blob(int total, int offset, byte[] data, int chunkOffset, int chunkLength, Bound bound) {
+        if (Bound.required(bound, "max_dyn_blob_len").exceededBy(total)) {
+            throw overCap("blob length", total, bound);
+        }
         if (offset == 0 && chunkLength >= total) {
             return Arrays.copyOfRange(data, chunkOffset, chunkOffset + total);
         }
@@ -120,6 +178,19 @@ public final class PayloadAcc {
         }
         len = 0;
         return Arrays.copyOf(buf, total);
+    }
+
+    /**
+     * Build the {@link SofabError#LIMIT_EXCEEDED} rejection, out of line so the
+     * comparison that guards it stays two instructions on the decode path.
+     *
+     * <p>The detail names the announced length and the limit it broke, which is
+     * what a receiver acts on: raise the limit, or the sender sends less. It does
+     * not name the field — this class is handed a payload, not a schema — so a
+     * caller wanting the field in the message catches and re-raises.
+     */
+    private static java.io.UncheckedIOException overCap(String noun, int total, Bound bound) {
+        return Sofab.limitExceeded(noun + " " + total + " above configured limit " + bound.cap());
     }
 
     /**

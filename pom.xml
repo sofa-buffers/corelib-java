@@ -12,16 +12,23 @@
        is what Maven admits) plus artifactId corelib. The normative half is the
        namespace, and every symbol is under org.sofabuffers.sofab. -->
   <artifactId>corelib</artifactId>
-  <!-- 0.11.0: behaviour-breaking, not source-breaking. OStream.overScratch now
+  <!-- 0.12.0: source-breaking. The three §6.2.1 receiver caps are now arguments
+       on the calls generated code already makes — PayloadAcc.string/blob take the
+       cap on the announced length, Seq.reserveRow* the cap on the row index — so
+       every one of those call sites gains a parameter. The library still holds no
+       limit and defines no default for one; Sofab.SCHEMA_BOUNDED is what a caller
+       passes where the schema bounds the field instead. Sofab.API_VERSION is the
+       WIRE contract and stays 1: the bytes are unchanged.
+       (0.11.0: behaviour-breaking, not source-breaking. OStream.overScratch now
        hands a thread the same OStream instance at every call, re-armed, instead of
        a new one over the shared buffer - so two overScratch streams held at once
        on one thread are now one stream, where before they were two over one
        buffer. Both were already documented as valid only until the same thread
        asks again. Pre-1.0, the minor is where a breaking change lands.
-       Sofab.API_VERSION is the WIRE contract and stays 1: the bytes are
-       unchanged. (0.9.0 removed writeSequenceBegin in favour of the
-       writeSequenceBeginLazy / writeSequenceEnd / writeSequenceEndKeep trio.) -->
-  <version>0.11.0</version>
+       Sofab.API_VERSION stayed 1 there too. 0.9.0 removed writeSequenceBegin in
+       favour of the writeSequenceBeginLazy / writeSequenceEnd /
+       writeSequenceEndKeep trio.) -->
+  <version>0.12.0</version>
   <packaging>jar</packaging>
 
   <name>SofaBuffers CoreLib (Java)</name>

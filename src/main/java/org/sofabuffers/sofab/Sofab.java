@@ -102,12 +102,64 @@ public final class Sofab {
      *
      * <p>{@link SofabError#LIMIT_EXCEEDED} — a receiver-side policy rejection of
      * well-formed bytes (§6.2.1) — is deliberately not this, and is not latched:
-     * wrap it explicitly where it is raised.
+     * it travels through {@link #limitExceeded(String)} instead.
      *
      * @param detail human-readable context, naming the field and the bound it broke
      * @return the exception to throw
      */
     public static UncheckedIOException invalid(String detail) {
         return new UncheckedIOException(new SofabException(SofabError.INVALID_MSG, detail));
+    }
+
+    /**
+     * The carrier a receiver-side limit (§6.2.1) is refused through: a
+     * {@link SofabError#LIMIT_EXCEEDED} {@link SofabException}, wrapped like
+     * {@link #invalid} so it can leave a callback that declares no checked
+     * exception.
+     *
+     * <p>It is the twin of {@link #invalid} and deliberately not the same thing.
+     * {@code INVALID_MSG} says <em>these bytes are broken</em> and is latched by
+     * {@link IStream#feed}, so the decode is terminal and every later call repeats
+     * the rejection. {@code LIMIT_EXCEEDED} says <em>these bytes are fine and this
+     * receiver declines to hold that much</em>: the same message decodes under a
+     * looser limit, so it is not latched, is never folded into
+     * {@link DecodeStatus#INVALID}, and is never clamped or truncated into a
+     * shortened value.
+     *
+     * <p>Raised from two places, and only where a cap was actually supplied:
+     * {@link PayloadAcc#string} / {@link PayloadAcc#blob} at a payload's announced
+     * length, and the {@link Seq} row reservations at a wrapper array's element
+     * index. Both take the number as an argument, inside the {@link Bound} that
+     * says which of §6.2.1's two rules governs the field.
+     *
+     * @param detail human-readable context, naming the value and the limit it broke
+     * @return the exception to throw
+     */
+    public static UncheckedIOException limitExceeded(String detail) {
+        return new UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, detail));
+    }
+
+    /**
+     * The carrier a defect in the <b>call</b> is refused through: a
+     * {@link SofabError#ARGUMENT} {@link SofabException}, wrapped like
+     * {@link #invalid} so it can leave a callback that declares no checked
+     * exception.
+     *
+     * <p>It is what §6.3 calls {@code InvalidArgument}, and it is deliberately
+     * neither of the other two. {@code INVALID_MSG} would mark a well-formed
+     * message malformed; {@code LIMIT_EXCEEDED} would "promise a limit to raise
+     * that was never configured" (§6.3). The mistake is in the call, not in the
+     * bytes and not in the deployment.
+     *
+     * <p>Raised where a {@link Bound} the caller had to state is missing — a
+     * {@code null} where a receiver cap or {@link Bound#SCHEMA_BOUNDED} belonged.
+     * §6.2.1 forbids reading an omitted argument as <em>unlimited</em>, so an
+     * omission is reported rather than obeyed.
+     *
+     * @param detail human-readable context, naming what the call failed to state
+     * @return the exception to throw
+     */
+    public static UncheckedIOException argument(String detail) {
+        return new UncheckedIOException(new SofabException(SofabError.ARGUMENT, detail));
     }
 }

@@ -41,23 +41,23 @@ class PayloadAccTest {
     /** Feed {@code payload} to a fresh accumulator, split at {@code at}. */
     private static String stringSplitAt(byte[] payload, int at) {
         PayloadAcc acc = new PayloadAcc();
-        String first = acc.string(payload.length, 0, payload, 0, at);
+        String first = acc.string(payload.length, 0, payload, 0, at, Bound.SCHEMA_BOUNDED);
         if (at >= payload.length) {
             return first;
         }
         assertNull(first, "a payload short of its total is not complete");
-        return acc.string(payload.length, at, payload, at, payload.length - at);
+        return acc.string(payload.length, at, payload, at, payload.length - at, Bound.SCHEMA_BOUNDED);
     }
 
     /** As {@link #stringSplitAt}, for a blob. */
     private static byte[] blobSplitAt(byte[] payload, int at) {
         PayloadAcc acc = new PayloadAcc();
-        byte[] first = acc.blob(payload.length, 0, payload, 0, at);
+        byte[] first = acc.blob(payload.length, 0, payload, 0, at, Bound.SCHEMA_BOUNDED);
         if (at >= payload.length) {
             return first;
         }
         assertNull(first, "a payload short of its total is not complete");
-        return acc.blob(payload.length, at, payload, at, payload.length - at);
+        return acc.blob(payload.length, at, payload, at, payload.length - at, Bound.SCHEMA_BOUNDED);
     }
 
     // --- the split must not be observable ------------------------------------
@@ -115,7 +115,7 @@ class PayloadAccTest {
         String out = null;
         for (int i = 0; i < payload.length; i++) {
             assertNull(out, "completed early at byte " + i);
-            out = acc.string(payload.length, i, payload, i, 1);
+            out = acc.string(payload.length, i, payload, i, 1, Bound.SCHEMA_BOUNDED);
         }
         assertEquals(MIXED, out);
     }
@@ -130,7 +130,7 @@ class PayloadAccTest {
         PayloadAcc acc = new PayloadAcc();
         byte[] out = null;
         for (int i = 0; i < payload.length; i++) {
-            out = acc.blob(payload.length, i, payload, i, 1);
+            out = acc.blob(payload.length, i, payload, i, 1, Bound.SCHEMA_BOUNDED);
         }
         assertArrayEquals(payload, out);
     }
@@ -144,19 +144,19 @@ class PayloadAccTest {
     @Test
     void anAnnouncedTotalNearTwoToThe31AllocatesNothing() {
         PayloadAcc acc = new PayloadAcc();
-        assertNull(acc.blob(Integer.MAX_VALUE, 0, bytes('a', 'b', 'c'), 0, 3));
-        assertNull(acc.blob(Integer.MAX_VALUE, 3, bytes('d'), 0, 1));
+        assertNull(acc.blob(Integer.MAX_VALUE, 0, bytes('a', 'b', 'c'), 0, 3, Bound.SCHEMA_BOUNDED));
+        assertNull(acc.blob(Integer.MAX_VALUE, 3, bytes('d'), 0, 1, Bound.SCHEMA_BOUNDED));
     }
 
     /** A payload that never completed is dropped when the next one starts. */
     @Test
     void anAbandonedPayloadIsNotPrefixedOntoTheNext() {
         PayloadAcc acc = new PayloadAcc();
-        assertNull(acc.string(9, 0, bytes('s', 't', 'a', 'l', 'e'), 0, 5));
+        assertNull(acc.string(9, 0, bytes('s', 't', 'a', 'l', 'e'), 0, 5, Bound.SCHEMA_BOUNDED));
 
         byte[] next = bytes('o', 'k');
-        assertNull(acc.string(2, 0, next, 0, 1));
-        assertEquals("ok", acc.string(2, 1, next, 1, 1));
+        assertNull(acc.string(2, 0, next, 0, 1, Bound.SCHEMA_BOUNDED));
+        assertEquals("ok", acc.string(2, 1, next, 1, 1, Bound.SCHEMA_BOUNDED));
     }
 
     /** The bytes handed back are the caller's; the input buffer is only borrowed. */
@@ -164,13 +164,13 @@ class PayloadAccTest {
     void theBlobHandedBackIsACopy() {
         byte[] input = bytes(1, 2, 3, 4);
         PayloadAcc acc = new PayloadAcc();
-        assertNull(acc.blob(4, 0, input, 0, 2));
-        byte[] out = acc.blob(4, 2, input, 2, 2);
+        assertNull(acc.blob(4, 0, input, 0, 2, Bound.SCHEMA_BOUNDED));
+        byte[] out = acc.blob(4, 2, input, 2, 2, Bound.SCHEMA_BOUNDED);
         assertNotSame(input, out);
         Arrays.fill(input, (byte) 0);
         assertArrayEquals(bytes(1, 2, 3, 4), out, "the copy is not a view");
 
-        byte[] whole = acc.blob(4, 0, bytes(9, 8, 7, 6), 0, 4);
+        byte[] whole = acc.blob(4, 0, bytes(9, 8, 7, 6), 0, 4, Bound.SCHEMA_BOUNDED);
         assertArrayEquals(bytes(9, 8, 7, 6), whole, "and so is the one-chunk answer");
     }
 
@@ -178,8 +178,8 @@ class PayloadAccTest {
     @Test
     void anEmptyPayloadIsAValue() {
         PayloadAcc acc = new PayloadAcc();
-        assertEquals("", acc.string(0, 0, Seq.EMPTY_BYTES, 0, 0));
-        assertArrayEquals(Seq.EMPTY_BYTES, acc.blob(0, 0, Seq.EMPTY_BYTES, 0, 0));
+        assertEquals("", acc.string(0, 0, Seq.EMPTY_BYTES, 0, 0, Bound.SCHEMA_BOUNDED));
+        assertArrayEquals(Seq.EMPTY_BYTES, acc.blob(0, 0, Seq.EMPTY_BYTES, 0, 0, Bound.SCHEMA_BOUNDED));
     }
 
     /** The chunk lives at {@code chunkOffset} in the decoder's buffer, not at 0. */
@@ -187,10 +187,10 @@ class PayloadAccTest {
     void theChunkIsReadAtItsOffsetInTheInputBuffer() {
         byte[] input = bytes('x', 'x', 'h', 'i', 'x');
         PayloadAcc acc = new PayloadAcc();
-        assertEquals("hi", acc.string(2, 0, input, 2, 2));
+        assertEquals("hi", acc.string(2, 0, input, 2, 2, Bound.SCHEMA_BOUNDED));
 
-        assertNull(acc.blob(2, 0, input, 2, 1));
-        assertArrayEquals(bytes('h', 'i'), acc.blob(2, 1, input, 3, 1));
+        assertNull(acc.blob(2, 0, input, 2, 1, Bound.SCHEMA_BOUNDED));
+        assertArrayEquals(bytes('h', 'i'), acc.blob(2, 1, input, 3, 1, Bound.SCHEMA_BOUNDED));
     }
 
     /** One accumulator serves payload after payload, in either flavour. */
@@ -198,16 +198,16 @@ class PayloadAccTest {
     void oneAccumulatorServesPayloadAfterPayload() {
         PayloadAcc acc = new PayloadAcc();
         byte[] first = bytes('o', 'n', 'e');
-        assertNull(acc.string(3, 0, first, 0, 2));
-        assertEquals("one", acc.string(3, 2, first, 2, 1));
+        assertNull(acc.string(3, 0, first, 0, 2, Bound.SCHEMA_BOUNDED));
+        assertEquals("one", acc.string(3, 2, first, 2, 1, Bound.SCHEMA_BOUNDED));
 
         byte[] second = bytes('t', 'w', 'o');
-        assertNull(acc.blob(3, 0, second, 0, 1));
-        assertArrayEquals(second, acc.blob(3, 1, second, 1, 2));
+        assertNull(acc.blob(3, 0, second, 0, 1, Bound.SCHEMA_BOUNDED));
+        assertArrayEquals(second, acc.blob(3, 1, second, 1, 2, Bound.SCHEMA_BOUNDED));
 
         byte[] third = bytes('s', 'i', 'x');
-        assertNull(acc.string(3, 0, third, 0, 1));
-        assertEquals("six", acc.string(3, 1, third, 1, 2));
+        assertNull(acc.string(3, 0, third, 0, 1, Bound.SCHEMA_BOUNDED));
+        assertEquals("six", acc.string(3, 1, third, 1, 2, Bound.SCHEMA_BOUNDED));
     }
 
     // --- driven by the decoder, at every chunk size ---------------------------
@@ -250,7 +250,7 @@ class PayloadAccTest {
 
         @Override
         public void string(int id, int total, int offset, byte[] data, int co, int cl) {
-            String s = acc.string(total, offset, data, co, cl);
+            String s = acc.string(total, offset, data, co, cl, Bound.SCHEMA_BOUNDED);
             if (s != null) {
                 strings.add(s);
             }
@@ -258,7 +258,7 @@ class PayloadAccTest {
 
         @Override
         public void blob(int id, int total, int offset, byte[] data, int co, int cl) {
-            byte[] b = acc.blob(total, offset, data, co, cl);
+            byte[] b = acc.blob(total, offset, data, co, cl, Bound.SCHEMA_BOUNDED);
             if (b != null) {
                 blobs.add(b);
             }
