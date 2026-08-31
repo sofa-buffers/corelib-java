@@ -24,8 +24,10 @@ import java.util.Arrays;
  * value comes back on the chunk that completes it, and {@code null} before that:
  *
  * <pre>{@code
+ * private static final Bound STRING_CAP = Bound.receiver(MAX_DYN_STRING_LEN);
+ *
  * public void string(int id, int total, int offset, byte[] data, int co, int cl) {
- *     String s = acc.string(total, offset, data, co, cl, MAX_DYN_STRING_LEN);
+ *     String s = acc.string(total, offset, data, co, cl, STRING_CAP);
  *     if (s == null) {
  *         return;                  // more chunks to come
  *     }
@@ -44,12 +46,19 @@ import java.util.Arrays;
  * sent.
  *
  * <p><b>The receiver cap is compared here (CORELIB_PLAN §6.2.1).</b> Both methods
- * take a {@code max} argument and test the announced {@code total} against it at
- * the top, before the payload is buffered or materialized — §6.2.1's enforcement
- * point, "at the count/length header, before the allocation it is meant to
- * prevent". A breach is {@link Sofab#limitExceeded}: the bytes are well-formed and
- * this receiver declines to hold that much, so it is a policy rejection and never
+ * take a {@link Bound} and test the announced {@code total} against it at the top,
+ * before the payload is buffered or materialized — §6.2.1's enforcement point, "at
+ * the count/length header, before the allocation it is meant to prevent". A breach
+ * is {@link Sofab#limitExceeded}: the bytes are well-formed and this receiver
+ * declines to hold that much, so it is a policy rejection and never
  * {@link SofabError#INVALID_MSG}.
+ *
+ * <p><b>The two answers are not one number.</b> {@link Bound#receiver(long)} states
+ * the deployment's cap and {@link Bound#SCHEMA_BOUNDED} states that the schema's
+ * {@code maxlen} governs instead — a distinct value carrying no number, so a caller
+ * that forgot to configure a cap cannot arrive here spelling the same thing a
+ * schema-bounded field spells. A missing bound is {@link Sofab#argument}, never
+ * silently uncapped.
  *
  * <p><b>The number is the caller's.</b> §6.2.1 fixes the provenance of a receiver
  * limit — it comes from generated code, which knows the schema and the target —
@@ -59,7 +68,7 @@ import java.util.Arrays;
  * call it was given for, or clamps to one, and a caller that passes the cap here
  * does <b>not</b> also guard in front of the call — one implementation, wherever
  * it runs. Where the schema bounds the field there is no receiver cap to pass:
- * see {@link Sofab#SCHEMA_BOUNDED}.
+ * see {@link Bound#SCHEMA_BOUNDED}.
  *
  * <p><b>A skipped field is never capped.</b> The check sits behind the decoder's
  * wire-type dispatch and behind the caller's own destination switch, so a field
@@ -104,20 +113,23 @@ public final class PayloadAcc {
      * @param data        backing array containing the chunk
      * @param chunkOffset start of the chunk within {@code data}
      * @param chunkLength number of bytes in the chunk
-     * @param max         the caller's {@code max_dyn_string_len} (§6.2.1) for a
-     *                    schema-unbounded field, or {@link Sofab#SCHEMA_BOUNDED}
-     *                    where the schema's {@code maxlen} governs instead — which
-     *                    is not "unlimited"
+     * @param bound       {@link Bound#receiver(long)} carrying the caller's
+     *                    {@code max_dyn_string_len} (§6.2.1) for a schema-unbounded
+     *                    field, or {@link Bound#SCHEMA_BOUNDED} where the schema's
+     *                    {@code maxlen} governs instead — which is neither
+     *                    "unlimited" nor a cap left unstated
      * @return the completed string, or null if the payload is still incomplete
      * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
      *                                      {@link SofabException} when
-     *                                      {@code total} exceeds {@code max}, or an
+     *                                      {@code total} exceeds the receiver cap,
+     *                                      an {@code ARGUMENT} one when
+     *                                      {@code bound} is null, or an
      *                                      {@code INVALID_MSG} one when the
      *                                      completed payload is not valid UTF-8
      */
-    public String string(int total, int offset, byte[] data, int chunkOffset, int chunkLength, long max) {
-        if (max >= 0 && total > max) {
-            throw overCap("string length", total, max);
+    public String string(int total, int offset, byte[] data, int chunkOffset, int chunkLength, Bound bound) {
+        if (Bound.required(bound, "max_dyn_string_len").exceededBy(total)) {
+            throw overCap("string length", total, bound);
         }
         if (offset == 0 && chunkLength >= total) {
             return Utf8.decode(data, chunkOffset, total);
@@ -142,18 +154,21 @@ public final class PayloadAcc {
      * @param data        backing array containing the chunk
      * @param chunkOffset start of the chunk within {@code data}
      * @param chunkLength number of bytes in the chunk
-     * @param max         the caller's {@code max_dyn_blob_len} (§6.2.1) for a
-     *                    schema-unbounded field, or {@link Sofab#SCHEMA_BOUNDED}
-     *                    where the schema's {@code maxlen} governs instead. A
-     *                    {@code blob} and a {@code string} are separate limits.
+     * @param bound       {@link Bound#receiver(long)} carrying the caller's
+     *                    {@code max_dyn_blob_len} (§6.2.1) for a schema-unbounded
+     *                    field, or {@link Bound#SCHEMA_BOUNDED} where the schema's
+     *                    {@code maxlen} governs instead. A {@code blob} and a
+     *                    {@code string} are separate limits.
      * @return the completed payload, or null if it is still incomplete
      * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
      *                                      {@link SofabException} when
-     *                                      {@code total} exceeds {@code max}
+     *                                      {@code total} exceeds the receiver cap,
+     *                                      or an {@code ARGUMENT} one when
+     *                                      {@code bound} is null
      */
-    public byte[] blob(int total, int offset, byte[] data, int chunkOffset, int chunkLength, long max) {
-        if (max >= 0 && total > max) {
-            throw overCap("blob length", total, max);
+    public byte[] blob(int total, int offset, byte[] data, int chunkOffset, int chunkLength, Bound bound) {
+        if (Bound.required(bound, "max_dyn_blob_len").exceededBy(total)) {
+            throw overCap("blob length", total, bound);
         }
         if (offset == 0 && chunkLength >= total) {
             return Arrays.copyOfRange(data, chunkOffset, chunkOffset + total);
@@ -174,8 +189,8 @@ public final class PayloadAcc {
      * not name the field — this class is handed a payload, not a schema — so a
      * caller wanting the field in the message catches and re-raises.
      */
-    private static java.io.UncheckedIOException overCap(String noun, int total, long max) {
-        return Sofab.limitExceeded(noun + " " + total + " above configured limit " + max);
+    private static java.io.UncheckedIOException overCap(String noun, int total, Bound bound) {
+        return Sofab.limitExceeded(noun + " " + total + " above configured limit " + bound.cap());
     }
 
     /**

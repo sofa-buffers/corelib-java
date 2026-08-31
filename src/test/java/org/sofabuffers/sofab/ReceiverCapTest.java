@@ -44,8 +44,11 @@ import org.junit.jupiter.api.Test;
  */
 class ReceiverCapTest {
 
+    /** The number behind {@link #CAP}, where a test needs the value itself. */
+    private static final int CAP_VALUE = 8;
+
     /** A receiver cap small enough that the payloads below run past it. */
-    private static final long CAP = 8;
+    private static final Bound CAP = Bound.receiver(CAP_VALUE);
 
     /** A payload of {@code n} bytes of ASCII 'a' — valid UTF-8, so only the cap can refuse it. */
     private static byte[] payload(int n) {
@@ -87,7 +90,7 @@ class ReceiverCapTest {
     @Test
     void aPayloadExactlyAtItsCapIsAccepted() {
         PayloadAcc acc = new PayloadAcc();
-        byte[] p = payload((int) CAP);
+        byte[] p = payload(CAP_VALUE);
         assertEquals("aaaaaaaa", acc.string(p.length, 0, p, 0, p.length, CAP));
         assertArrayEquals(p, acc.blob(p.length, 0, p, 0, p.length, CAP));
     }
@@ -122,7 +125,7 @@ class ReceiverCapTest {
         byte[] p = payload(16);
         assertThrows(UncheckedIOException.class,
                 () -> acc.string(p.length, 0, p, 0, p.length, CAP));
-        assertArrayEquals(p, acc.blob(p.length, 0, p, 0, p.length, 32));
+        assertArrayEquals(p, acc.blob(p.length, 0, p, 0, p.length, Bound.receiver(32)));
     }
 
     /**
@@ -135,12 +138,12 @@ class ReceiverCapTest {
         byte[] p = payload(16);
         assertThrows(UncheckedIOException.class,
                 () -> acc.string(p.length, 0, p, 0, p.length, CAP));
-        assertEquals("a".repeat(16), acc.string(p.length, 0, p, 0, p.length, 16));
-        assertEquals("a".repeat(16), acc.string(p.length, 0, p, 0, p.length, Sofab.SCHEMA_BOUNDED));
+        assertEquals("a".repeat(16), acc.string(p.length, 0, p, 0, p.length, Bound.receiver(16)));
+        assertEquals("a".repeat(16), acc.string(p.length, 0, p, 0, p.length, Bound.SCHEMA_BOUNDED));
     }
 
     /**
-     * {@link Sofab#SCHEMA_BOUNDED} says the schema's own bound governs this field,
+     * {@link Bound#SCHEMA_BOUNDED} says the schema's own bound governs this field,
      * so no receiver cap is compared here — §6.2.1 forbids applying one "to a field
      * the schema already bounds", where a breach is {@code INVALID} and the caller's
      * to raise.
@@ -149,7 +152,7 @@ class ReceiverCapTest {
     void theSchemaBoundedSentinelAppliesNoCapOfItsOwn() {
         PayloadAcc acc = new PayloadAcc();
         byte[] p = payload(4096);
-        assertEquals("a".repeat(4096), acc.string(p.length, 0, p, 0, p.length, Sofab.SCHEMA_BOUNDED));
+        assertEquals("a".repeat(4096), acc.string(p.length, 0, p, 0, p.length, Bound.SCHEMA_BOUNDED));
     }
 
     /**
@@ -160,7 +163,7 @@ class ReceiverCapTest {
     @Test
     void anAnnouncedTotalIsNotCappedByAnyCeilingOfItsOwn() {
         PayloadAcc acc = new PayloadAcc();
-        assertNull(acc.blob(Integer.MAX_VALUE, 0, bytes('a', 'b', 'c'), 0, 3, Sofab.SCHEMA_BOUNDED));
+        assertNull(acc.blob(Integer.MAX_VALUE, 0, bytes('a', 'b', 'c'), 0, 3, Bound.SCHEMA_BOUNDED));
     }
 
     // --- wrapper arrays: the element index ----------------------------------
@@ -174,11 +177,11 @@ class ReceiverCapTest {
     void aRowIndexAtItsCapIsRefused() {
         List<List<String>> rows = new ArrayList<>();
         UncheckedIOException e = assertThrows(UncheckedIOException.class,
-                () -> Seq.reserveRow(rows, 4, 4));
+                () -> Seq.reserveRow(rows, 4, Bound.receiver(4)));
         assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(e));
         assertEquals(0, rows.size(), "refused, so the list never grew");
 
-        Seq.reserveRow(rows, 3, 4);
+        Seq.reserveRow(rows, 3, Bound.receiver(4));
         assertEquals(4, rows.size(), "and index max - 1 is the last one that fits");
     }
 
@@ -193,17 +196,17 @@ class ReceiverCapTest {
         List<double[]> d = new ArrayList<>();
 
         assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(assertThrows(UncheckedIOException.class,
-                () -> Seq.reserveRowBytes(b, 4, 1, 4))));
+                () -> Seq.reserveRowBytes(b, 4, 1, Bound.receiver(4)))));
         assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(assertThrows(UncheckedIOException.class,
-                () -> Seq.reserveRowShorts(s, 4, 1, 4))));
+                () -> Seq.reserveRowShorts(s, 4, 1, Bound.receiver(4)))));
         assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(assertThrows(UncheckedIOException.class,
-                () -> Seq.reserveRowInts(i, 4, 1, 4))));
+                () -> Seq.reserveRowInts(i, 4, 1, Bound.receiver(4)))));
         assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(assertThrows(UncheckedIOException.class,
-                () -> Seq.reserveRowLongs(l, 4, 1, 4))));
+                () -> Seq.reserveRowLongs(l, 4, 1, Bound.receiver(4)))));
         assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(assertThrows(UncheckedIOException.class,
-                () -> Seq.reserveRowFloats(f, 4, 1, 4))));
+                () -> Seq.reserveRowFloats(f, 4, 1, Bound.receiver(4)))));
         assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(assertThrows(UncheckedIOException.class,
-                () -> Seq.reserveRowDoubles(d, 4, 1, 4))));
+                () -> Seq.reserveRowDoubles(d, 4, 1, Bound.receiver(4)))));
 
         for (List<?> rows : List.of(b, s, i, l, f, d)) {
             assertEquals(0, rows.size(), "a refused index grows nothing");
@@ -219,7 +222,7 @@ class ReceiverCapTest {
     void theIndexIsRefusedBeforeTheRowIsAllocated() {
         List<int[]> rows = new ArrayList<>();
         UncheckedIOException e = assertThrows(UncheckedIOException.class,
-                () -> Seq.reserveRowInts(rows, 9, Integer.MAX_VALUE, 4));
+                () -> Seq.reserveRowInts(rows, 9, Integer.MAX_VALUE, Bound.receiver(4)));
         assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(e));
         assertEquals(0, rows.size());
     }
@@ -228,8 +231,8 @@ class ReceiverCapTest {
     @Test
     void anOverCapIndexIsNotClampedIntoTheList() {
         List<int[]> rows = new ArrayList<>();
-        Seq.reserveRowInts(rows, 0, 2, 4);
-        assertThrows(UncheckedIOException.class, () -> Seq.reserveRowInts(rows, 7, 2, 4));
+        Seq.reserveRowInts(rows, 0, 2, Bound.receiver(4));
+        assertThrows(UncheckedIOException.class, () -> Seq.reserveRowInts(rows, 7, 2, Bound.receiver(4)));
         assertEquals(1, rows.size(), "the refused row was neither appended nor moved down");
     }
 
@@ -237,7 +240,7 @@ class ReceiverCapTest {
     @Test
     void aSchemaBoundedRowIndexIsTheCallersToCheck() {
         List<int[]> rows = new ArrayList<>();
-        Seq.reserveRowInts(rows, 40, 1, Sofab.SCHEMA_BOUNDED);
+        Seq.reserveRowInts(rows, 40, 1, Bound.SCHEMA_BOUNDED);
         assertEquals(41, rows.size());
     }
 
@@ -275,7 +278,7 @@ class ReceiverCapTest {
     void theSameBytesDecodeUnderALooserLimit() throws IOException {
         byte[] msg = oneString(64);
         for (int chunk : CHUNKS) {
-            CappedVisitor v = new CappedVisitor(1024);
+            CappedVisitor v = new CappedVisitor(Bound.receiver(1024));
             assertEquals("A", verdict(msg, v, chunk), "chunk " + chunk);
             assertEquals(64, v.value.length(), "chunk " + chunk);
         }
@@ -316,13 +319,56 @@ class ReceiverCapTest {
         }
     }
 
+    /**
+     * A bound that was never stated is refused, not read as "no cap". §6.2.1 lets a
+     * corelib take the number as an argument but forbids it to "read an omitted
+     * argument as <em>unlimited</em>", and §6.3 puts a defect in the <b>call</b>
+     * under {@code ARGUMENT}: {@code LIMIT_EXCEEDED} "would promise a limit to
+     * raise that was never configured", and {@code INVALID_MSG} would call
+     * well-formed bytes malformed.
+     */
+    @Test
+    void anUnstatedBoundIsRefusedRatherThanReadAsNoCap() {
+        PayloadAcc acc = new PayloadAcc();
+        byte[] p = payload(64);
+        assertEquals(SofabError.ARGUMENT, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> acc.string(p.length, 0, p, 0, p.length, null))));
+        assertEquals(SofabError.ARGUMENT, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> acc.blob(p.length, 0, p, 0, p.length, null))));
+
+        List<int[]> rows = new ArrayList<>();
+        assertEquals(SofabError.ARGUMENT, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> Seq.reserveRowInts(rows, 3, 1, null))));
+        assertEquals(0, rows.size(), "refused before anything was reserved");
+    }
+
+    /**
+     * The two answers of §6.2.1 are separate values and neither can be reached by
+     * omission. "The schema bounds this field" carries no number at all, and the
+     * two values a forgotten cap actually arrives as — Java's unassigned {@code 0},
+     * and the negative that used to be the sentinel — are refused where the cap is
+     * stated rather than interpreted as a policy.
+     */
+    @Test
+    void aForgottenCapCannotBeSpelledAsASchemaBound() {
+        assertThrows(IllegalArgumentException.class, () -> Bound.receiver(0),
+                "0 is an unassigned field, not a configured limit");
+        assertThrows(IllegalArgumentException.class, () -> Bound.receiver(-1),
+                "the retired sentinel is not a cap and is not \"the schema bounds this\"");
+        assertEquals("Bound.receiver(1)", Bound.receiver(1).toString(), "1 is a real cap");
+        assertNotEquals(Bound.SCHEMA_BOUNDED, Bound.receiver(Sofab.ARRAY_MAX),
+                "not even the format ceiling is the schema statement (§6.2.1)");
+    }
+
     /** This library states no receiver limit of its own, anywhere in its API. */
     @Test
     void thisLibraryHoldsNoReceiverLimit() {
         // The three §6.2.1 caps are arguments, never constants here: what Sofab
-        // exposes are the format ceilings, whose breach is INVALID_MSG, plus the
-        // sentinel that says a schema bound governs instead.
-        assertTrue(Sofab.SCHEMA_BOUNDED < 0, "the sentinel is not a limit value");
+        // exposes are the format ceilings, whose breach is INVALID_MSG. The one
+        // Bound this library defines states which RULE governs a field and carries
+        // no number at all, so it cannot be read as a limit.
+        assertEquals("Bound.SCHEMA_BOUNDED", Bound.SCHEMA_BOUNDED.toString());
+        assertTrue(Bound.SCHEMA_BOUNDED.cap() < 0, "it states a rule, not a limit value");
         assertEquals(Integer.MAX_VALUE, Sofab.ID_MAX);
         assertEquals(Integer.MAX_VALUE, Sofab.ARRAY_MAX);
     }
@@ -354,11 +400,11 @@ class ReceiverCapTest {
     private static final class CappedVisitor implements Visitor {
 
         private final PayloadAcc acc = new PayloadAcc();
-        private final long maxDynStringLen;
+        private final Bound maxDynStringLen;
 
         String value;
 
-        CappedVisitor(long maxDynStringLen) {
+        CappedVisitor(Bound maxDynStringLen) {
             this.maxDynStringLen = maxDynStringLen;
         }
 

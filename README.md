@@ -263,14 +263,15 @@ is an argument, an element type is a type parameter.
 
 | symbol | what it is |
 |---|---|
-| `Seq.reserveRow` / `reserveRowBytes` … `reserveRowDoubles` | place a matrix row at the index its id names, filling a gap with the empty row rather than shifting every later row down (MESSAGE_SPEC §5.1 / §7.4); the receiver cap on that index is an argument and is compared here (§6.2.1) |
+| `Seq.reserveRow` / `reserveRowBytes` … `reserveRowDoubles` | place a matrix row at the index its id names, filling a gap with the empty row rather than shifting every later row down (MESSAGE_SPEC §5.1 / §7.4); the receiver cap on that index arrives as a `Bound` and is compared here (§6.2.1) |
 | `Seq.ensureCap` (one per primitive width) | the array-growth policy: double, stop at the announced count, and never allocate from a count the wire claimed but has not delivered |
 | `Seq.ARRAY_INIT_CAP`, `Seq.EMPTY_BYTES` … `EMPTY_DOUBLES` | the bounded first reservation, and the shared zero-length arrays a field initializer points at |
 | `Seq.reset` / `Seq.orEmpty` / `Seq.boolsToLongs` | re-arm a reused destination in place; absorb a null field on the encode side; the one boxed-to-primitive conversion `bool` still needs |
-| `PayloadAcc` | reassemble a `string` / `blob` payload split across feeds — a payload that arrives whole never touches its buffer, and the value never depends on where the split fell; the receiver cap on the announced length is an argument and is compared before the first chunk is taken (§6.2.1) |
+| `PayloadAcc` | reassemble a `string` / `blob` payload split across feeds — a payload that arrives whole never touches its buffer, and the value never depends on where the split fell; the receiver cap on the announced length arrives as a `Bound` and is compared before the first chunk is taken (§6.2.1) |
 | `Utf8.decode` | validate a byte range and materialize it, in that order — the only order in which invalid UTF-8 can still be rejected (§6.4) |
 | `Sofab.invalid` | the carrier a `Visitor` rejects malformed input through, since a callback declares no checked exception; `IStream.feed` latches it as terminal like its own rejections |
-| `Sofab.limitExceeded` / `Sofab.SCHEMA_BOUNDED` | the twin carrier for a receiver-limit refusal, which is **not** latched as `INVALID`; and the value passed for a cap where the schema bounds the field instead |
+| `Sofab.limitExceeded` / `Sofab.argument` | the twin carrier for a receiver-limit refusal, which is **not** latched as `INVALID`; and the carrier for a defect in the call, such as a bound the caller never stated |
+| `Bound.receiver` / `Bound.SCHEMA_BOUNDED` | which of §6.2.1's two rules bounds one field: the deployment's configured cap, or the schema's own `count`/`maxlen` |
 | `OStream.overScratch` / `copyOfBytesUsed` | a per-thread buffer for a one-shot `encode()`, so the worst case is allocated once per thread rather than once per call. The **size** stays with the caller (CORELIB_PLAN §5.1): generated code passes its own `MAX_SIZE` |
 
 These are ordinary public API, usable directly; they are simply shaped by what
@@ -289,16 +290,42 @@ the limit guards:
 
 | the cap | the call that takes it | compared against |
 |---|---|---|
-| `max_dyn_string_len` | `PayloadAcc.string(…, max)` | the announced `total`, before a byte is buffered |
-| `max_dyn_blob_len` | `PayloadAcc.blob(…, max)` | the same |
-| `max_dyn_array_count` | `Seq.reserveRow` / `reserveRow*(…, max)` | the row **index**, before the row and the list grow |
+| `max_dyn_string_len` | `PayloadAcc.string(…, bound)` | the announced `total`, before a byte is buffered |
+| `max_dyn_blob_len` | `PayloadAcc.blob(…, bound)` | the same |
+| `max_dyn_array_count` | `Seq.reserveRow` / `reserveRow*(…, bound)` | the row **index**, before the row and the list grow |
 
 A breach is `SofabError.LIMIT_EXCEEDED` — a policy rejection of well-formed bytes,
-never clamped into a shortened value and never the `INVALID` outcome. Where the
-schema bounds a field the caller passes `Sofab.SCHEMA_BOUNDED`, which states that
-the schema's `maxlen` or `count` governs (a breach there is the caller's
-`Sofab.invalid`) rather than that the field is unlimited. A caller that passes a
-cap here does not also guard in front of the call: the rule has one implementation.
+never clamped into a shortened value and never the `INVALID` outcome. A caller that
+passes a cap here does not also guard in front of the call: the rule has one
+implementation.
+
+`Bound` is what each of those calls takes, and it has exactly the two answers
+§6.2.1 admits — never one number with a reserved value for the second:
+
+```java
+private static final Bound TAGS_CAP = Bound.receiver(MAX_DYN_ARRAY_COUNT);
+
+Seq.reserveRow(rows, id, TAGS_CAP);              // schema declares no count:
+Seq.reserveRow(rows, id, Bound.SCHEMA_BOUNDED);  // count: N — checked one line above
+```
+
+`Bound.receiver(n)` is the deployment's configured number for a schema-unbounded
+field. `Bound.SCHEMA_BOUNDED` states that the schema's `maxlen`/`count` governs
+instead (a breach there is the caller's `Sofab.invalid`, `INVALID_MSG`) — it carries
+no number, because this library does not apply the schema bound and a second copy of
+that rule here is what §6.2.1's *one implementation* forbids.
+
+**A cap that was never stated is reported, not obeyed.** §6.2.1 admits "no unset
+state and no unlimited mode" and forbids reading an omitted argument as *unlimited*,
+so there is no numeric value that means "the schema bounds this" and nothing to
+default to: `Bound.receiver` refuses `0` (Java's unassigned field) and every
+negative (the sentinel this shape replaced), and a `null` bound is
+`SofabError.ARGUMENT` — a defect in the **call**, not `LIMIT_EXCEEDED`, which would
+promise a limit to raise that was never configured (§6.3). `ARRAY_MAX` is a format
+ceiling and is not available as a fallback either.
+
+Build each `Bound` once, into a `static final`: they are constants of the
+deployment, so nothing is allocated per call or per message.
 
 Two checks stay in generated code, because no call into this library carries them:
 a **native array count** (`new int[count]` is written straight into the field) and
