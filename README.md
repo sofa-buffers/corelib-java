@@ -29,14 +29,14 @@ over the field id. The wire format is specified language-neutrally in the
 
 ### Package name
 
-Maven coordinates `org.sofabuffers:corelib` (version `0.11.0`); the import namespace
+Maven coordinates `org.sofabuffers:corelib` (version `0.12.0`); the import namespace
 is the package `org.sofabuffers.sofab`.
 
 ```xml
 <dependency>
   <groupId>org.sofabuffers</groupId>
   <artifactId>corelib</artifactId>
-  <version>0.11.0</version>
+  <version>0.12.0</version>
 </dependency>
 ```
 
@@ -263,17 +263,47 @@ is an argument, an element type is a type parameter.
 
 | symbol | what it is |
 |---|---|
-| `Seq.reserveRow` / `reserveRowBytes` … `reserveRowDoubles` | place a matrix row at the index its id names, filling a gap with the empty row rather than shifting every later row down (MESSAGE_SPEC §5.1 / §7.4) |
+| `Seq.reserveRow` / `reserveRowBytes` … `reserveRowDoubles` | place a matrix row at the index its id names, filling a gap with the empty row rather than shifting every later row down (MESSAGE_SPEC §5.1 / §7.4); the receiver cap on that index is an argument and is compared here (§6.2.1) |
 | `Seq.ensureCap` (one per primitive width) | the array-growth policy: double, stop at the announced count, and never allocate from a count the wire claimed but has not delivered |
 | `Seq.ARRAY_INIT_CAP`, `Seq.EMPTY_BYTES` … `EMPTY_DOUBLES` | the bounded first reservation, and the shared zero-length arrays a field initializer points at |
 | `Seq.reset` / `Seq.orEmpty` / `Seq.boolsToLongs` | re-arm a reused destination in place; absorb a null field on the encode side; the one boxed-to-primitive conversion `bool` still needs |
-| `PayloadAcc` | reassemble a `string` / `blob` payload split across feeds — a payload that arrives whole never touches its buffer, and the value never depends on where the split fell |
+| `PayloadAcc` | reassemble a `string` / `blob` payload split across feeds — a payload that arrives whole never touches its buffer, and the value never depends on where the split fell; the receiver cap on the announced length is an argument and is compared before the first chunk is taken (§6.2.1) |
 | `Utf8.decode` | validate a byte range and materialize it, in that order — the only order in which invalid UTF-8 can still be rejected (§6.4) |
 | `Sofab.invalid` | the carrier a `Visitor` rejects malformed input through, since a callback declares no checked exception; `IStream.feed` latches it as terminal like its own rejections |
+| `Sofab.limitExceeded` / `Sofab.SCHEMA_BOUNDED` | the twin carrier for a receiver-limit refusal, which is **not** latched as `INVALID`; and the value passed for a cap where the schema bounds the field instead |
 | `OStream.overScratch` / `copyOfBytesUsed` | a per-thread buffer for a one-shot `encode()`, so the worst case is allocated once per thread rather than once per call. The **size** stays with the caller (CORELIB_PLAN §5.1): generated code passes its own `MAX_SIZE` |
 
 These are ordinary public API, usable directly; they are simply shaped by what
 generated code needs.
+
+### Receiver limits
+
+The library holds **no** receiver-side limit (CORELIB_PLAN §6.2.1). It defines no
+`max_dyn_string_len`, `max_dyn_blob_len` or `max_dyn_array_count`, no default for
+one, and no fallback: the numbers belong to generated code, which knows the schema
+and the target. `ID_MAX`, `ARRAY_MAX` and `MAX_DEPTH` are **format** ceilings —
+breaching one is `INVALID_MSG`, never `LIMIT_EXCEEDED`.
+
+The **comparison** runs here, on the call generated code already makes at the point
+the limit guards:
+
+| the cap | the call that takes it | compared against |
+|---|---|---|
+| `max_dyn_string_len` | `PayloadAcc.string(…, max)` | the announced `total`, before a byte is buffered |
+| `max_dyn_blob_len` | `PayloadAcc.blob(…, max)` | the same |
+| `max_dyn_array_count` | `Seq.reserveRow` / `reserveRow*(…, max)` | the row **index**, before the row and the list grow |
+
+A breach is `SofabError.LIMIT_EXCEEDED` — a policy rejection of well-formed bytes,
+never clamped into a shortened value and never the `INVALID` outcome. Where the
+schema bounds a field the caller passes `Sofab.SCHEMA_BOUNDED`, which states that
+the schema's `maxlen` or `count` governs (a breach there is the caller's
+`Sofab.invalid`) rather than that the field is unlimited. A caller that passes a
+cap here does not also guard in front of the call: the rule has one implementation.
+
+Two checks stay in generated code, because no call into this library carries them:
+a **native array count** (`new int[count]` is written straight into the field) and
+the element **index of a flat wrapper array** of strings, blobs or sub-messages
+(placed by an inline `while (list.size() <= id)`).
 
 ## Memory handling
 

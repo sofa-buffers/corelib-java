@@ -102,7 +102,7 @@ public final class Sofab {
      *
      * <p>{@link SofabError#LIMIT_EXCEEDED} — a receiver-side policy rejection of
      * well-formed bytes (§6.2.1) — is deliberately not this, and is not latched:
-     * wrap it explicitly where it is raised.
+     * it travels through {@link #limitExceeded(String)} instead.
      *
      * @param detail human-readable context, naming the field and the bound it broke
      * @return the exception to throw
@@ -110,4 +110,58 @@ public final class Sofab {
     public static UncheckedIOException invalid(String detail) {
         return new UncheckedIOException(new SofabException(SofabError.INVALID_MSG, detail));
     }
+
+    /**
+     * The carrier a receiver-side limit (§6.2.1) is refused through: a
+     * {@link SofabError#LIMIT_EXCEEDED} {@link SofabException}, wrapped like
+     * {@link #invalid} so it can leave a callback that declares no checked
+     * exception.
+     *
+     * <p>It is the twin of {@link #invalid} and deliberately not the same thing.
+     * {@code INVALID_MSG} says <em>these bytes are broken</em> and is latched by
+     * {@link IStream#feed}, so the decode is terminal and every later call repeats
+     * the rejection. {@code LIMIT_EXCEEDED} says <em>these bytes are fine and this
+     * receiver declines to hold that much</em>: the same message decodes under a
+     * looser limit, so it is not latched, is never folded into
+     * {@link DecodeStatus#INVALID}, and is never clamped or truncated into a
+     * shortened value.
+     *
+     * <p>Raised from two places, and only where a cap was actually supplied:
+     * {@link PayloadAcc#string} / {@link PayloadAcc#blob} at a payload's announced
+     * length, and the {@link Seq} row reservations at a wrapper array's element
+     * index. Both take the number as an argument — see {@link #SCHEMA_BOUNDED}.
+     *
+     * @param detail human-readable context, naming the value and the limit it broke
+     * @return the exception to throw
+     */
+    public static UncheckedIOException limitExceeded(String detail) {
+        return new UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, detail));
+    }
+
+    /**
+     * What a caller passes for a receiver cap where the <b>schema</b> bounds the
+     * field, so §6.2.1 forbids a receiver cap on it: "they <b>MUST NOT</b> be
+     * applied to a field the schema already bounds. There the schema bound governs
+     * and its violation is {@code INVALID}".
+     *
+     * <p><b>It is not "unlimited".</b> It states that this field's ceiling is the
+     * schema's — a {@code maxlen} or a {@code count} the caller has already
+     * enforced with {@link #invalid}, at the same length or count header — and that
+     * there is therefore no second, receiver-configured number to compare against.
+     * §6.2.1 admits no unset state and no unlimited mode: passing this on a field
+     * the schema leaves <em>unbounded</em> lets the sender choose how much this
+     * process holds, and is a defect in the <b>call</b>, not a mode this library
+     * offers.
+     *
+     * <p>Any negative value reads the same way; this is the one to write, because
+     * a call site that spells it says which of the two rules governs the field.
+     *
+     * <p>This library holds no receiver limit and defines no default for one
+     * (§6.2.1: a codec "<b>MUST NOT</b> hold a limit of its own, <b>MUST NOT</b>
+     * supply a default for one it was not given"). {@link #ARRAY_MAX} and
+     * {@link #ID_MAX} are <em>format</em> ceilings — exceeding one is
+     * {@link SofabError#INVALID_MSG}, never {@link SofabError#LIMIT_EXCEEDED} —
+     * and are not receiver caps of any kind.
+     */
+    public static final long SCHEMA_BOUNDED = -1L;
 }

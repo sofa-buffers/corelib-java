@@ -154,7 +154,7 @@ class SeqTest {
     @Test
     void aWrapperRowGapFillsRatherThanShifts() {
         List<List<String>> rows = new ArrayList<>();
-        Seq.reserveRow(rows, 2);
+        Seq.reserveRow(rows, 2, Sofab.SCHEMA_BOUNDED);
         rows.get(2).add("third");
 
         assertEquals(3, rows.size());
@@ -170,11 +170,11 @@ class SeqTest {
     @Test
     void aRepeatedWrapperRowIsEmptiedInPlace() {
         List<List<String>> rows = new ArrayList<>();
-        Seq.reserveRow(rows, 0);
+        Seq.reserveRow(rows, 0, Sofab.SCHEMA_BOUNDED);
         List<String> first = rows.get(0);
         first.add("stale");
 
-        Seq.reserveRow(rows, 0);
+        Seq.reserveRow(rows, 0, Sofab.SCHEMA_BOUNDED);
         assertSame(first, rows.get(0), "the row object is reused");
         assertEquals(List.of(), rows.get(0), "its value is replaced, not merged into");
         assertEquals(1, rows.size());
@@ -185,7 +185,7 @@ class SeqTest {
     void aNullWrapperRowIsMaterialized() {
         List<List<String>> rows = new ArrayList<>();
         rows.add(null);
-        Seq.reserveRow(rows, 0);
+        Seq.reserveRow(rows, 0, Sofab.SCHEMA_BOUNDED);
         assertEquals(List.of(), rows.get(0));
     }
 
@@ -193,7 +193,7 @@ class SeqTest {
     @Test
     void aPrimitiveRowGapFillsWithTheSharedEmptyRow() {
         List<int[]> rows = new ArrayList<>();
-        int[] row = Seq.reserveRowInts(rows, 2, 3);
+        int[] row = Seq.reserveRowInts(rows, 2, 3, Sofab.SCHEMA_BOUNDED);
 
         assertEquals(3, rows.size());
         assertSame(Seq.EMPTY_INTS, rows.get(0), "a gap costs no allocation");
@@ -206,9 +206,9 @@ class SeqTest {
     @Test
     void aRepeatedPrimitiveRowIsReplaced() {
         List<int[]> rows = new ArrayList<>();
-        int[] first = Seq.reserveRowInts(rows, 0, 2);
+        int[] first = Seq.reserveRowInts(rows, 0, 2, Sofab.SCHEMA_BOUNDED);
         first[0] = 9;
-        int[] second = Seq.reserveRowInts(rows, 0, 2);
+        int[] second = Seq.reserveRowInts(rows, 0, 2, Sofab.SCHEMA_BOUNDED);
 
         assertNotSame(first, second);
         assertSame(second, rows.get(0));
@@ -223,42 +223,42 @@ class SeqTest {
     @Test
     void everyPrimitiveRowWidthPlacesAlike() {
         List<byte[]> bytes = new ArrayList<>();
-        assertEquals(2, Seq.reserveRowBytes(bytes, 1, 2).length);
+        assertEquals(2, Seq.reserveRowBytes(bytes, 1, 2, Sofab.SCHEMA_BOUNDED).length);
         assertSame(Seq.EMPTY_BYTES, bytes.get(0));
-        assertSame(Seq.reserveRowBytes(bytes, 1, 3), bytes.get(1));
+        assertSame(Seq.reserveRowBytes(bytes, 1, 3, Sofab.SCHEMA_BOUNDED), bytes.get(1));
 
         List<short[]> shorts = new ArrayList<>();
-        assertEquals(2, Seq.reserveRowShorts(shorts, 1, 2).length);
+        assertEquals(2, Seq.reserveRowShorts(shorts, 1, 2, Sofab.SCHEMA_BOUNDED).length);
         assertSame(Seq.EMPTY_SHORTS, shorts.get(0));
-        assertSame(Seq.reserveRowShorts(shorts, 1, 3), shorts.get(1));
+        assertSame(Seq.reserveRowShorts(shorts, 1, 3, Sofab.SCHEMA_BOUNDED), shorts.get(1));
 
         List<long[]> longs = new ArrayList<>();
-        assertEquals(2, Seq.reserveRowLongs(longs, 1, 2).length);
+        assertEquals(2, Seq.reserveRowLongs(longs, 1, 2, Sofab.SCHEMA_BOUNDED).length);
         assertSame(Seq.EMPTY_LONGS, longs.get(0));
-        assertSame(Seq.reserveRowLongs(longs, 1, 3), longs.get(1));
+        assertSame(Seq.reserveRowLongs(longs, 1, 3, Sofab.SCHEMA_BOUNDED), longs.get(1));
 
         List<float[]> floats = new ArrayList<>();
-        assertEquals(2, Seq.reserveRowFloats(floats, 1, 2).length);
+        assertEquals(2, Seq.reserveRowFloats(floats, 1, 2, Sofab.SCHEMA_BOUNDED).length);
         assertSame(Seq.EMPTY_FLOATS, floats.get(0));
-        assertSame(Seq.reserveRowFloats(floats, 1, 3), floats.get(1));
+        assertSame(Seq.reserveRowFloats(floats, 1, 3, Sofab.SCHEMA_BOUNDED), floats.get(1));
 
         List<double[]> doubles = new ArrayList<>();
-        assertEquals(2, Seq.reserveRowDoubles(doubles, 1, 2).length);
+        assertEquals(2, Seq.reserveRowDoubles(doubles, 1, 2, Sofab.SCHEMA_BOUNDED).length);
         assertSame(Seq.EMPTY_DOUBLES, doubles.get(0));
-        assertSame(Seq.reserveRowDoubles(doubles, 1, 3), doubles.get(1));
+        assertSame(Seq.reserveRowDoubles(doubles, 1, 3, Sofab.SCHEMA_BOUNDED), doubles.get(1));
     }
 
     /** A row reserved at the very next index appends rather than growing a gap. */
     @Test
     void aRowAtTheNextIndexAppends() {
         List<int[]> rows = new ArrayList<>();
-        Seq.reserveRowInts(rows, 0, 1);
-        Seq.reserveRowInts(rows, 1, 1);
+        Seq.reserveRowInts(rows, 0, 1, Sofab.SCHEMA_BOUNDED);
+        Seq.reserveRowInts(rows, 1, 1, Sofab.SCHEMA_BOUNDED);
         assertEquals(2, rows.size());
 
         List<List<String>> wrappers = new ArrayList<>();
-        Seq.reserveRow(wrappers, 0);
-        Seq.reserveRow(wrappers, 1);
+        Seq.reserveRow(wrappers, 0, Sofab.SCHEMA_BOUNDED);
+        Seq.reserveRow(wrappers, 1, Sofab.SCHEMA_BOUNDED);
         assertEquals(2, wrappers.size());
     }
 

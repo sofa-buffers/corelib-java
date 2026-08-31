@@ -37,6 +37,34 @@ import java.util.List;
  * <b>A count is untrusted</b>: it is the wire's claim about how many elements
  * follow, bounded by nothing until a schema {@code count} or a receiver limit
  * bounds it, so no method here allocates from a count alone.
+ *
+ * <p><b>Receiver caps (CORELIB_PLAN §6.2.1).</b> The row reservations —
+ * {@link #reserveRow} and the six primitive {@code reserveRow*} overloads — take
+ * the cap on the outer array's element <b>index</b> and compare it here, before
+ * the row is created and before the outer list is grown to hold it. A wrapper
+ * array announces no count, so the index is what a cap can bind: its length is
+ * highest present id + 1 (MESSAGE_SPEC §5.1), and two elements at id 0 and id
+ * 65535 are a 65536-slot list. §6.2.1 permits exactly this placement — "a corelib
+ * MAY take a limit as an argument and perform the check itself, and a port that
+ * does is conformant" — and the rule then has <b>one</b> implementation: a caller
+ * that passes the cap does not also guard in front of the call.
+ *
+ * <p><b>Nothing here holds a limit.</b> The number is the caller's, used for that
+ * one comparison and not retained; there is no default, no fallback and no
+ * clamping, and {@link Sofab#ARRAY_MAX} is a <em>format</em> ceiling rather than a
+ * receiver cap. Where the schema bounds the outer array the caller passes
+ * {@link Sofab#SCHEMA_BOUNDED} and rejects an over-capacity index itself, as
+ * {@code INVALID} (MESSAGE_SPEC §7.1).
+ *
+ * <p><b>What the caps here do not cover.</b> The cap on a row's own element
+ * <b>count</b>, and on the count of a top-level native array, is not one of these
+ * arguments: {@code n} below is a length the caller has already bounded, and the
+ * two numbers can be governed by different rules — an inner array the schema
+ * bounds inside an outer one it does not. A native array count also has no call
+ * into this class at all; generated code writes {@code new int[count]} straight
+ * into its field. Those checks therefore stay in generated code, deliberately,
+ * and this class must not grow a helper to hold them: a call invented to carry a
+ * check costs more than the guard it replaces.
  */
 public final class Seq {
 
@@ -95,15 +123,28 @@ public final class Seq {
      * decode into the same destination sees it emptied; a decode destination is not
      * shared.
      *
-     * <p>{@code id} is the wire's, so the caller bounds it against the outer
-     * array's schema capacity <em>before</em> calling: this grows the list to hold
-     * it.
+     * <p>{@code id} is the wire's, and this grows the list to hold it, so it is
+     * bounded here. Which bound depends on the outer array: where the schema
+     * declares a capacity the caller checks it before calling and rejects a
+     * breach as {@code INVALID} (MESSAGE_SPEC §7.1), passing
+     * {@link Sofab#SCHEMA_BOUNDED} for {@code max}; where the schema declares
+     * none, {@code max} is the receiver cap and the comparison happens here
+     * (§6.2.1).
      *
      * @param rows the outer list, one entry per row
      * @param id   index of the row to reserve
+     * @param max  the caller's {@code max_dyn_array_count} (§6.2.1), or
+     *             {@link Sofab#SCHEMA_BOUNDED} where the schema bounds the outer
+     *             array
      * @param <T>  row element type
+     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
+     *                                      {@link SofabException} when {@code id}
+     *                                      is at or past {@code max}
      */
-    public static <T> void reserveRow(List<List<T>> rows, int id) {
+    public static <T> void reserveRow(List<List<T>> rows, int id, long max) {
+        if (max >= 0 && id >= max) {
+            throw overIndexCap(id, max);
+        }
         while (rows.size() < id) {
             rows.add(new ArrayList<>());
         }
@@ -132,9 +173,19 @@ public final class Seq {
      * @param rows the outer list, one entry per row
      * @param id   index of the row to reserve
      * @param n    initial length of the new row
+     * @param max  the caller's {@code max_dyn_array_count} (§6.2.1) bounding the
+     *             row <em>index</em>, or {@link Sofab#SCHEMA_BOUNDED} where the
+     *             schema bounds the outer array. It does not bound {@code n},
+     *             which the caller has already bounded.
      * @return the new row, now at index {@code id}
+     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
+     *                                      {@link SofabException} when {@code id}
+     *                                      is at or past {@code max}
      */
-    public static byte[] reserveRowBytes(List<byte[]> rows, int id, int n) {
+    public static byte[] reserveRowBytes(List<byte[]> rows, int id, int n, long max) {
+        if (max >= 0 && id >= max) {
+            throw overIndexCap(id, max);
+        }
         byte[] row = new byte[n];
         while (rows.size() < id) {
             rows.add(EMPTY_BYTES);
@@ -153,9 +204,19 @@ public final class Seq {
      * @param rows the outer list, one entry per row
      * @param id   index of the row to reserve
      * @param n    initial length of the new row
+     * @param max  the caller's {@code max_dyn_array_count} (§6.2.1) bounding the
+     *             row <em>index</em>, or {@link Sofab#SCHEMA_BOUNDED} where the
+     *             schema bounds the outer array. It does not bound {@code n},
+     *             which the caller has already bounded.
      * @return the new row, now at index {@code id}
+     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
+     *                                      {@link SofabException} when {@code id}
+     *                                      is at or past {@code max}
      */
-    public static short[] reserveRowShorts(List<short[]> rows, int id, int n) {
+    public static short[] reserveRowShorts(List<short[]> rows, int id, int n, long max) {
+        if (max >= 0 && id >= max) {
+            throw overIndexCap(id, max);
+        }
         short[] row = new short[n];
         while (rows.size() < id) {
             rows.add(EMPTY_SHORTS);
@@ -174,9 +235,19 @@ public final class Seq {
      * @param rows the outer list, one entry per row
      * @param id   index of the row to reserve
      * @param n    initial length of the new row
+     * @param max  the caller's {@code max_dyn_array_count} (§6.2.1) bounding the
+     *             row <em>index</em>, or {@link Sofab#SCHEMA_BOUNDED} where the
+     *             schema bounds the outer array. It does not bound {@code n},
+     *             which the caller has already bounded.
      * @return the new row, now at index {@code id}
+     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
+     *                                      {@link SofabException} when {@code id}
+     *                                      is at or past {@code max}
      */
-    public static int[] reserveRowInts(List<int[]> rows, int id, int n) {
+    public static int[] reserveRowInts(List<int[]> rows, int id, int n, long max) {
+        if (max >= 0 && id >= max) {
+            throw overIndexCap(id, max);
+        }
         int[] row = new int[n];
         while (rows.size() < id) {
             rows.add(EMPTY_INTS);
@@ -195,9 +266,19 @@ public final class Seq {
      * @param rows the outer list, one entry per row
      * @param id   index of the row to reserve
      * @param n    initial length of the new row
+     * @param max  the caller's {@code max_dyn_array_count} (§6.2.1) bounding the
+     *             row <em>index</em>, or {@link Sofab#SCHEMA_BOUNDED} where the
+     *             schema bounds the outer array. It does not bound {@code n},
+     *             which the caller has already bounded.
      * @return the new row, now at index {@code id}
+     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
+     *                                      {@link SofabException} when {@code id}
+     *                                      is at or past {@code max}
      */
-    public static long[] reserveRowLongs(List<long[]> rows, int id, int n) {
+    public static long[] reserveRowLongs(List<long[]> rows, int id, int n, long max) {
+        if (max >= 0 && id >= max) {
+            throw overIndexCap(id, max);
+        }
         long[] row = new long[n];
         while (rows.size() < id) {
             rows.add(EMPTY_LONGS);
@@ -216,9 +297,19 @@ public final class Seq {
      * @param rows the outer list, one entry per row
      * @param id   index of the row to reserve
      * @param n    initial length of the new row
+     * @param max  the caller's {@code max_dyn_array_count} (§6.2.1) bounding the
+     *             row <em>index</em>, or {@link Sofab#SCHEMA_BOUNDED} where the
+     *             schema bounds the outer array. It does not bound {@code n},
+     *             which the caller has already bounded.
      * @return the new row, now at index {@code id}
+     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
+     *                                      {@link SofabException} when {@code id}
+     *                                      is at or past {@code max}
      */
-    public static float[] reserveRowFloats(List<float[]> rows, int id, int n) {
+    public static float[] reserveRowFloats(List<float[]> rows, int id, int n, long max) {
+        if (max >= 0 && id >= max) {
+            throw overIndexCap(id, max);
+        }
         float[] row = new float[n];
         while (rows.size() < id) {
             rows.add(EMPTY_FLOATS);
@@ -237,9 +328,19 @@ public final class Seq {
      * @param rows the outer list, one entry per row
      * @param id   index of the row to reserve
      * @param n    initial length of the new row
+     * @param max  the caller's {@code max_dyn_array_count} (§6.2.1) bounding the
+     *             row <em>index</em>, or {@link Sofab#SCHEMA_BOUNDED} where the
+     *             schema bounds the outer array. It does not bound {@code n},
+     *             which the caller has already bounded.
      * @return the new row, now at index {@code id}
+     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
+     *                                      {@link SofabException} when {@code id}
+     *                                      is at or past {@code max}
      */
-    public static double[] reserveRowDoubles(List<double[]> rows, int id, int n) {
+    public static double[] reserveRowDoubles(List<double[]> rows, int id, int n, long max) {
+        if (max >= 0 && id >= max) {
+            throw overIndexCap(id, max);
+        }
         double[] row = new double[n];
         while (rows.size() < id) {
             rows.add(EMPTY_DOUBLES);
@@ -250,6 +351,21 @@ public final class Seq {
             rows.set(id, row);
         }
         return row;
+    }
+
+    /**
+     * Build the {@link SofabError#LIMIT_EXCEEDED} rejection for a row index at or
+     * past its cap, out of line so the comparison that guards it stays two
+     * instructions on the decode path.
+     *
+     * <p>The index is compared with {@code >=} rather than {@code >} because a
+     * wrapper array's length is highest present id + 1 (MESSAGE_SPEC §5.1): an
+     * element at index {@code max} makes a list of {@code max + 1}, which is one
+     * more than the receiver said it would hold. Rejected, never clamped — placing
+     * the element at {@code max - 1} instead would be data corruption.
+     */
+    private static java.io.UncheckedIOException overIndexCap(int id, long max) {
+        return Sofab.limitExceeded("array element index " + id + " above configured limit " + max);
     }
 
     /**
