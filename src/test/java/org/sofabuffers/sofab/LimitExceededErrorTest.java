@@ -19,10 +19,14 @@ import java.io.IOException;
 import org.junit.jupiter.api.Test;
 
 /**
- * The corelib does not enforce decode limits (that lives in generated code), so
- * these tests exercise the error category itself: that generated code can raise a
- * limit violation uniformly and that it stays strictly distinguishable from the
- * wire-malformation category {@link SofabError#INVALID_MSG}.
+ * The corelib defines no decode limit of its own — the numbers come from generated
+ * code (CORELIB_PLAN §6.2.1) — so these tests exercise the error <em>category</em>:
+ * that a limit violation is raised uniformly and stays strictly distinguishable
+ * from the wire-malformation category {@link SofabError#INVALID_MSG}.
+ *
+ * <p>Where a cap this library is <em>handed</em> is compared, and what it does
+ * there, is {@code ReceiverCapTest}. Here the check is spelled out by hand, as
+ * generated code spells it for the field kinds that carry no call into the corelib.
  */
 class LimitExceededErrorTest {
 
