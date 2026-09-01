@@ -24,6 +24,19 @@
  * the codec's behalf. Warm up first, or class loading and JIT compilation
  * dominate the count.
  *
+ * Warming up is not enough on its own, which is what issue #106 was: a single
+ * window occasionally reads a few hundred bytes on a decode path that allocates
+ * nothing, because the counter is the *thread's*, not the codec's, and the JVM
+ * does work of its own on this thread -- re-materializing what a compiled frame
+ * had scalar-replaced when that frame is deoptimized. The reading is one burst,
+ * not a per-message cost: 496 bytes over 2000 decodes is a quarter of a byte
+ * each, where the smallest real object would be sixteen. So each assertion
+ * measures WINDOWS windows and reads the *least* of them. That keeps the
+ * assertion at zero, which is what §6.6 says: a codec that allocates per message
+ * multiplies its bytes by the repetition count and can never produce an empty
+ * window, so the least reading stays the exact test. Loosening the number to a
+ * threshold would not -- a real allocation would hide under it.
+ *
  * SPDX-License-Identifier: MIT
  */
 package org.sofabuffers.sofab;
@@ -51,6 +64,13 @@ class AllocationFreeTest {
      */
     private static final int FRESH = 200;
 
+    /**
+     * Windows measured per assertion; the least of them is the reading. Five is
+     * enough that a JVM burst landing in one leaves four clean, and cheap enough
+     * that the whole class still runs in well under a second.
+     */
+    private static final int WINDOWS = 5;
+
     // --- the two paths A2-0069 named ----------------------------------------
 
     /**
@@ -65,7 +85,7 @@ class AllocationFreeTest {
         for (int i = 0; i < WARMUP; i++) {
             encode(os, buf);
         }
-        long spent = allocatedOver(() -> {
+        long spent = leastAllocatedOver(window -> {
             for (int i = 0; i < REPS; i++) {
                 encode(os, buf);
             }
@@ -88,17 +108,19 @@ class AllocationFreeTest {
     @Test
     void theDeepestRunOnAFreshEncoderAllocatesNothing() throws IOException {
         byte[] buf = new byte[4096];
-        OStream[] fresh = new OStream[FRESH];
+        OStream[][] fresh = new OStream[WINDOWS][FRESH];
 
         for (int i = 0; i < FRESH; i++) {          // warm up on throwaway instances
             deepRun(new OStream(buf), buf);
         }
-        for (int i = 0; i < FRESH; i++) {
-            fresh[i] = new OStream(buf);
-        }
-        long spent = allocatedOver(() -> {
+        for (int w = 0; w < WINDOWS; w++) {        // one untouched batch per window
             for (int i = 0; i < FRESH; i++) {
-                deepRun(fresh[i], buf);
+                fresh[w][i] = new OStream(buf);
+            }
+        }
+        long spent = leastAllocatedOver(window -> {
+            for (int i = 0; i < FRESH; i++) {
+                deepRun(fresh[window][i], buf);
             }
         });
         assertEquals(0, spent, "holding back " + Sofab.MAX_DEPTH + " sequence headers allocated "
@@ -125,17 +147,19 @@ class AllocationFreeTest {
 
         Folding sink = new Folding();
         byte[] chunk = new byte[1];
-        IStream[] fresh = new IStream[FRESH];
+        IStream[][] fresh = new IStream[WINDOWS][FRESH];
 
         for (int i = 0; i < FRESH; i++) {          // warm up on throwaway instances
             feedByteAtATime(new IStream(), sink, message, chunk);
         }
-        for (int i = 0; i < FRESH; i++) {
-            fresh[i] = new IStream();
-        }
-        long spent = allocatedOver(() -> {
+        for (int w = 0; w < WINDOWS; w++) {        // one untouched batch per window
             for (int i = 0; i < FRESH; i++) {
-                feedByteAtATime(fresh[i], sink, message, chunk);
+                fresh[w][i] = new IStream();
+            }
+        }
+        long spent = leastAllocatedOver(window -> {
+            for (int i = 0; i < FRESH; i++) {
+                feedByteAtATime(fresh[window][i], sink, message, chunk);
             }
         });
         assertEquals(0, spent, "IStream allocated " + spent + " bytes over " + FRESH
@@ -158,7 +182,7 @@ class AllocationFreeTest {
         for (int i = 0; i < 2_000; i++) {
             feedByteAtATime(is, sink, message, chunk);
         }
-        long spent = allocatedOver(() -> {
+        long spent = leastAllocatedOver(window -> {
             for (int i = 0; i < 2_000; i++) {
                 feedByteAtATime(is, sink, message, chunk);
             }
@@ -180,7 +204,7 @@ class AllocationFreeTest {
             is.reset();
             is.feed(buf, 0, n, sink);
         }
-        long spent = allocatedOver(() -> {
+        long spent = leastAllocatedOver(window -> {
             for (int i = 0; i < REPS; i++) {
                 is.reset();
                 is.feed(buf, 0, n, sink);
@@ -208,13 +232,13 @@ class AllocationFreeTest {
             is.feed(large, sink);
         }
 
-        long forSmall = allocatedOver(() -> {
+        long forSmall = leastAllocatedOver(window -> {
             for (int i = 0; i < 500; i++) {
                 is.reset();
                 is.feed(small, sink);
             }
         });
-        long forLarge = allocatedOver(() -> {
+        long forLarge = leastAllocatedOver(window -> {
             for (int i = 0; i < 500; i++) {
                 is.reset();
                 is.feed(large, sink);
@@ -326,9 +350,33 @@ class AllocationFreeTest {
 
     // --- the measurement -----------------------------------------------------
 
-    /** Anything the measured window runs; {@link IOException} is the encoder's. */
+    /**
+     * Anything the measured window runs; {@link IOException} is the encoder's. The
+     * window number lets a body that needs untouched instances take a different
+     * batch each time, since a fresh codec is only fresh once.
+     */
     private interface Body {
-        void run() throws IOException;
+        void run(int window) throws IOException;
+    }
+
+    /**
+     * The smallest of {@link #WINDOWS} readings of {@code body} — the codec's own
+     * cost, with the JVM's work on this thread filtered out.
+     *
+     * <p>Filtering it out is sound because the two are different shapes. A codec
+     * that allocates per message, per field or per chunk pays in <em>every</em>
+     * window, multiplied by the repetition count; what the JVM does — the objects
+     * it re-materializes when it throws away a compiled frame — is a single burst
+     * of a few hundred bytes that lands in one window and not the next. So a zero
+     * reading is only available to a codec that really allocates nothing, and the
+     * assertion this feeds stays the exact zero §6.6 asks for (issue #106).
+     */
+    private static long leastAllocatedOver(Body body) throws IOException {
+        long least = Long.MAX_VALUE;
+        for (int window = 0; window < WINDOWS; window++) {
+            least = Math.min(least, allocatedOver(body, window));
+        }
+        return least;
     }
 
     /**
@@ -336,11 +384,11 @@ class AllocationFreeTest {
      * costs nothing measurable — it returns a counter the allocator maintains —
      * and the two reads bracket the window with no allocation between them.
      */
-    private static long allocatedOver(Body body) throws IOException {
+    private static long allocatedOver(Body body, int window) throws IOException {
         com.sun.management.ThreadMXBean bean = threadBean();
         long id = Thread.currentThread().getId();
         long before = bean.getThreadAllocatedBytes(id);
-        body.run();
+        body.run(window);
         long after = bean.getThreadAllocatedBytes(id);
         return after - before;
     }
