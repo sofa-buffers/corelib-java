@@ -76,7 +76,9 @@ class VectorConformanceTest {
             // Only the `vectors` array is read here. The file's other top-level
             // blocks belong elsewhere or nowhere yet: `invalid_utf8` is driven by
             // Utf8StrictTest / Utf8ChunkOffsetTest, and `sequence_growth`
-            // (CORELIB_PLAN §7.2 item 8) is not run by this port at all. An
+            // (CORELIB_PLAN §7.2 item 8) is not run by this port at all — its 8
+            // cases carry their own schema and a `dynamic_arrays` capability tag,
+            // and running them is tracked as its own issue (#110). An
             // unrecognized block is ignored rather than rejected, so re-copying a
             // regenerated file never fails on a block this port does not run.
             cachedVectors = root.getAsJsonArray("vectors");
@@ -320,10 +322,10 @@ class VectorConformanceTest {
         // clipped any of them would run a smaller matrix without saying so.
         assertTrue(maxSkipIds >= 9,
                 "skip_ids truncated: longest list loaded is " + maxSkipIds + ", the suite carries 9");
-        assertTrue(maxFieldId >= 100001,
-                "field id clipped: largest loaded is " + maxFieldId + ", the suite carries 100001");
-        assertTrue(maxArrayCount >= 130,
-                "array truncated: longest loaded is " + maxArrayCount + " elements, the suite carries 130");
+        assertTrue(maxFieldId >= 2147483647,
+                "field id clipped: largest loaded is " + maxFieldId + ", the suite carries 2147483647");
+        assertTrue(maxArrayCount >= 200,
+                "array truncated: longest loaded is " + maxArrayCount + " elements, the suite carries 200");
         assertTrue(maxPayloadBytes >= 130,
                 "payload truncated: longest loaded is " + maxPayloadBytes + " bytes, the suite carries 130");
         assertTrue(fp64Arrays > 0, "no fp64 array vector loaded (8-byte element length untested on the skip path)");
