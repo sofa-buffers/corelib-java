@@ -425,6 +425,20 @@ mvn -B test            # tests only
 report as the coverage and branches badges above. The suites live in
 `src/test/java/org/sofabuffers/sofab/`.
 
+The conformance run prints one line saying how much of the shared suite it
+executed — `[test_vectors] <n> vectors, <n> gated out by requires, <n> carrying
+skip_ids; <n> checks executed` — so the run is comparable with the other ports'
+runners rather than only self-reported green.
+
+`SequenceGrowthTest` runs the shared file's third top-level block (CORELIB_PLAN
+§7.2 item 8). A wrapper array carries no element count, so its length is *highest
+present id + 1* and the container grows as elements arrive — in the static helper
+layer (`Seq`), never in the codec. Two ports that grow differently emit identical
+bytes, so those cases are keyed by a delivery sequence of element ids instead: the
+port builds the message itself and asserts the resulting container length and
+outcome. The struct cases run through `Seq.reserveRow`, which is where the element
+index meets its `Bound`.
+
 ### Feature flags
 
 **None** — the build always ships the full format.
