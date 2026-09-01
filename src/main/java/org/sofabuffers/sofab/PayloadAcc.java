@@ -45,13 +45,30 @@ import java.util.Arrays;
  * over no receiver cap, cannot be made to allocate more than the peer actually
  * sent.
  *
- * <p><b>The receiver cap is compared here (CORELIB_PLAN §6.2.1).</b> Both methods
- * take a {@link Bound} and test the announced {@code total} against it at the top,
- * before the payload is buffered or materialized — §6.2.1's enforcement point, "at
- * the count/length header, before the allocation it is meant to prevent". A breach
- * is {@link Sofab#limitExceeded}: the bytes are well-formed and this receiver
- * declines to hold that much, so it is a policy rejection and never
+ * <p><b>The receiver cap is compared here (CORELIB_PLAN §6.2.1).</b> A breach is
+ * {@link Sofab#limitExceeded}: the bytes are well-formed and this receiver declines
+ * to hold that much, so it is a policy rejection and never
  * {@link SofabError#INVALID_MSG}.
+ *
+ * <p><b>...and it is offered at the LENGTH WORD, not only at the first chunk.</b>
+ * §6.2.1 puts the enforcement point "at the count/length header — before the
+ * allocation it is meant to prevent", and {@link #string} / {@link #blob} cannot
+ * be that point on their own: they fire only once a payload byte exists, so a
+ * message that ends immediately after the length word reaches neither. The
+ * announced length is already on the wire and the verdict is already decided, yet
+ * the decode would answer {@code INCOMPLETE} — losing the category (§6.3 makes the
+ * refusal terminal, and no continuation can lift it) and inviting a caller to keep
+ * feeding a stream this receiver has already refused. Three bytes claiming a
+ * hundred, or five claiming a megabyte, would hold a connection open: precisely
+ * the amplification the caps exist to close.
+ *
+ * <p>So the comparison is also reachable on its own, as
+ * {@link #checkStringLength} / {@link #checkBlobLength}, for a caller to make from
+ * {@link Visitor#fixlenBegin} — which the decoder raises at the length word, for
+ * exactly this reason. The payload methods keep calling the same two, so the rule
+ * has <b>one implementation</b> applied at two points (§6.2.1, "one
+ * implementation, wherever it runs"); an accumulator driven by hand, without the
+ * header call, still refuses an over-cap payload.
  *
  * <p><b>The two answers are not one number.</b> {@link Bound#receiver(long)} states
  * the deployment's cap and {@link Bound#SCHEMA_BOUNDED} states that the schema's
@@ -128,9 +145,7 @@ public final class PayloadAcc {
      *                                      completed payload is not valid UTF-8
      */
     public String string(int total, int offset, byte[] data, int chunkOffset, int chunkLength, Bound bound) {
-        if (Bound.required(bound, "max_dyn_string_len").exceededBy(total)) {
-            throw overCap("string length", total, bound);
-        }
+        checkStringLength(total, bound);
         if (offset == 0 && chunkLength >= total) {
             return Utf8.decode(data, chunkOffset, total);
         }
@@ -167,9 +182,7 @@ public final class PayloadAcc {
      *                                      {@code bound} is null
      */
     public byte[] blob(int total, int offset, byte[] data, int chunkOffset, int chunkLength, Bound bound) {
-        if (Bound.required(bound, "max_dyn_blob_len").exceededBy(total)) {
-            throw overCap("blob length", total, bound);
-        }
+        checkBlobLength(total, bound);
         if (offset == 0 && chunkLength >= total) {
             return Arrays.copyOfRange(data, chunkOffset, chunkOffset + total);
         }
@@ -178,6 +191,63 @@ public final class PayloadAcc {
         }
         len = 0;
         return Arrays.copyOf(buf, total);
+    }
+
+    /**
+     * Refuse an announced {@code string} length the receiver's cap does not admit
+     * — the §6.2.1 comparison on its own, for a caller to make at the
+     * <b>length word</b>.
+     *
+     * <p>{@link #string} calls this first, so a caller that only routes payload
+     * chunks is already covered. Call it in addition from
+     * {@link Visitor#fixlenBegin} to close the case no payload callback can see: a
+     * message whose length word declares more than the cap and then <em>ends</em>.
+     * There is no chunk, so there is no {@link #string} call, and the decode would
+     * report {@code INCOMPLETE} for bytes this receiver has already refused — a
+     * verdict §6.3 makes terminal and no continuation can lift.
+     *
+     * <p>Calling it at both points is not two implementations of the rule: it is
+     * this one, applied where §6.2.1 requires it and again where a hand-driven
+     * accumulator would otherwise slip past it.
+     *
+     * <p><b>Only for a field this message actually reads.</b> §6.2.1: "a skipped
+     * field is never capped" — a limit bounds an allocation, and a field walked
+     * over allocates nothing. A caller must resolve the destination, and the
+     * MESSAGE_SPEC §7.3 subtype test, before it gets here.
+     *
+     * @param total the announced payload length, as the {@code fixlen_word} gives it
+     * @param bound {@link Bound#receiver(long)} carrying this deployment's
+     *              {@code max_dyn_string_len}, or {@link Bound#SCHEMA_BOUNDED} where
+     *              the schema {@code maxlen} governs and the caller has already
+     *              enforced it
+     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
+     *                                      {@link SofabException} when {@code total}
+     *                                      is above the cap, or an {@code ARGUMENT}
+     *                                      one when {@code bound} is null
+     */
+    public static void checkStringLength(int total, Bound bound) {
+        if (Bound.required(bound, "max_dyn_string_len").exceededBy(total)) {
+            throw overCap("string length", total, bound);
+        }
+    }
+
+    /**
+     * Refuse an announced {@code blob} length the receiver's cap does not admit.
+     * The {@code blob} twin of {@link #checkStringLength}, down to why it exists;
+     * a {@code blob} and a {@code string} are separate limits.
+     *
+     * @param total the announced payload length, as the {@code fixlen_word} gives it
+     * @param bound {@link Bound#receiver(long)} carrying this deployment's
+     *              {@code max_dyn_blob_len}, or {@link Bound#SCHEMA_BOUNDED}
+     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
+     *                                      {@link SofabException} when {@code total}
+     *                                      is above the cap, or an {@code ARGUMENT}
+     *                                      one when {@code bound} is null
+     */
+    public static void checkBlobLength(int total, Bound bound) {
+        if (Bound.required(bound, "max_dyn_blob_len").exceededBy(total)) {
+            throw overCap("blob length", total, bound);
+        }
     }
 
     /**

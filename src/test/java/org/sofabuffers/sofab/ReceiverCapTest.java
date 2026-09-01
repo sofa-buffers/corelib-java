@@ -118,6 +118,89 @@ class ReceiverCapTest {
         assertEquals("aaaa", acc.string(ok.length, 0, ok, 0, ok.length, CAP));
     }
 
+    // --- the same comparison, offered at the LENGTH WORD ---------------------
+
+    /**
+     * The check reachable on its own, for the caller to make from
+     * {@link Visitor#fixlenBegin} — the point §6.2.1 actually names: "at the
+     * count/length header — before the allocation it is meant to prevent".
+     *
+     * <p>{@link PayloadAcc#string} cannot be that point by itself. It fires only
+     * once a payload byte exists, so a message whose length word declares 100
+     * bytes and then <em>ends</em> reaches no chunk, no call, and no verdict — and
+     * a decode that had already established the refusal answers {@code INCOMPLETE}
+     * instead, which §6.3 makes the wrong category (the refusal is terminal) and
+     * §5.2.4 makes an active invitation to feed more of a stream this receiver has
+     * refused. Three bytes claiming a hundred is the shape that matters.
+     */
+    @Test
+    void anOverCapLengthIsRefusedWithNoPayloadAtAll() {
+        UncheckedIOException e = assertThrows(UncheckedIOException.class,
+                () -> PayloadAcc.checkStringLength(100, CAP));
+        assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(e));
+
+        UncheckedIOException b = assertThrows(UncheckedIOException.class,
+                () -> PayloadAcc.checkBlobLength(1 << 20, CAP));
+        assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(b));
+    }
+
+    /** A length at or below the cap passes the header check silently. */
+    @Test
+    void anInCapLengthPassesTheHeaderCheck() {
+        PayloadAcc.checkStringLength(CAP_VALUE, CAP);
+        PayloadAcc.checkStringLength(0, CAP);
+        PayloadAcc.checkBlobLength(CAP_VALUE, CAP);
+    }
+
+    /**
+     * A schema-bounded field is not the receiver cap's business (§6.2.1: the caps
+     * "MUST NOT be applied to a field the schema already bounds"), so the header
+     * check passes any length for one — the caller's own {@code maxlen} reject,
+     * which is {@code INVALID_MSG}, has already run at that same word.
+     */
+    @Test
+    void theHeaderCheckLeavesASchemaBoundedFieldAlone() {
+        PayloadAcc.checkStringLength(1 << 20, Bound.SCHEMA_BOUNDED);
+        PayloadAcc.checkBlobLength(1 << 20, Bound.SCHEMA_BOUNDED);
+    }
+
+    /** An omitted bound is a caller defect here too, never read as "unlimited". */
+    @Test
+    void theHeaderCheckRefusesAnUnstatedBound() {
+        assertEquals(SofabError.ARGUMENT, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> PayloadAcc.checkStringLength(1, null))));
+        assertEquals(SofabError.ARGUMENT, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> PayloadAcc.checkBlobLength(1, null))));
+    }
+
+    /**
+     * One implementation, two application points (§6.2.1, "one implementation,
+     * wherever it runs"). The payload methods answer identically to the header
+     * check for the same number, so an accumulator driven by hand — without the
+     * header call — is still bounded, and a caller that makes both calls cannot
+     * get two different verdicts out of one length.
+     */
+    @Test
+    void theHeaderCheckAndThePayloadCallAgreeOnEveryLength() {
+        for (int total : new int[] {0, 1, CAP_VALUE - 1, CAP_VALUE, CAP_VALUE + 1, 100, 1 << 20}) {
+            SofabError header = null;
+            try {
+                PayloadAcc.checkStringLength(total, CAP);
+            } catch (UncheckedIOException e) {
+                header = categoryOf(e);
+            }
+            SofabError chunk = null;
+            try {
+                // One byte of a `total`-byte payload: enough to reach the guard,
+                // never enough to complete anything.
+                new PayloadAcc().string(total, 0, payload(Math.max(total, 1)), 0, Math.min(total, 1), CAP);
+            } catch (UncheckedIOException e) {
+                chunk = categoryOf(e);
+            }
+            assertEquals(header, chunk, "length " + total + " must get one verdict, not two");
+        }
+    }
+
     /** {@code string} and {@code blob} are separate limits (§6.2.1's table). */
     @Test
     void aStringCapDoesNotBindABlob() {
