@@ -425,6 +425,11 @@ mvn -B test            # tests only
 report as the coverage and branches badges above. The suites live in
 `src/test/java/org/sofabuffers/sofab/`.
 
+The conformance run prints one line saying how much of the shared suite it
+executed — `[test_vectors] <n> vectors, <n> gated out by requires, <n> carrying
+skip_ids; <n> checks executed` — so the run is comparable with the other ports'
+runners rather than only self-reported green.
+
 ### Feature flags
 
 **None** — the build always ships the full format.
