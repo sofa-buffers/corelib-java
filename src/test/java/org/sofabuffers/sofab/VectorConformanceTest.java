@@ -74,13 +74,13 @@ class VectorConformanceTest {
                     new InputStreamReader(in, StandardCharsets.UTF_8)).getAsJsonObject();
             assertEquals("sofabuffers-test-vectors", root.get("format").getAsString());
             // Only the `vectors` array is read here. The file's other top-level
-            // blocks belong elsewhere or nowhere yet: `invalid_utf8` is driven by
+            // blocks are driven by their own tests: `invalid_utf8` by
             // Utf8StrictTest / Utf8ChunkOffsetTest, and `sequence_growth`
-            // (CORELIB_PLAN §7.2 item 8) is not run by this port at all — its 8
-            // cases carry their own schema and a `dynamic_arrays` capability tag,
-            // and running them is tracked as its own issue (#110). An
-            // unrecognized block is ignored rather than rejected, so re-copying a
-            // regenerated file never fails on a block this port does not run.
+            // (CORELIB_PLAN §7.2 item 8) by SequenceGrowthTest, whose cases are
+            // keyed by a delivery sequence of element ids rather than by bytes and
+            // so share no shape with a vector. A block this file does not read is
+            // ignored rather than rejected, so re-copying a regenerated file never
+            // fails on one.
             cachedVectors = root.getAsJsonArray("vectors");
             return cachedVectors;
         } catch (IOException e) {
