@@ -245,10 +245,12 @@ class Utf8StrictTest {
      * The vectors' {@code decode_outcome: "invalid"} is a statement about the whole
      * message, so assert it where the outcome actually lives: feed
      * {@code serialized_hex} to an {@link IStream} driving the strict sink above
-     * and read the decoder's verdict. It must be {@link DecodeStatus#INVALID}, and
-     * terminal — a further feed of a well-formed field decodes nothing and cannot
-     * restore {@code COMPLETE} (corelib-java#71). Checked whole and one byte at a
-     * time: the verdict must not depend on how the payload was chunked.
+     * and read the decoder's verdict. That verdict is {@link DecodeStatus#INVALID},
+     * which never comes back as a return value — the decode throws
+     * {@link SofabError#INVALID_MSG} — and it is terminal: a further feed of a
+     * well-formed field decodes nothing and cannot restore {@code COMPLETE}
+     * (corelib-java#71). Checked whole and one byte at a time: the verdict must not
+     * depend on how the payload was chunked.
      */
     @TestFactory
     List<DynamicTest> invalidUtf8DecodeOutcomeIsInvalidAndTerminal() {
@@ -267,7 +269,7 @@ class Utf8StrictTest {
                             is.feed(wire, i, Math.min(chunk, wire.length - i), sink);
                         }
                     }, name + ": strict decode must reject the message");
-                    assertEquals(DecodeStatus.INVALID, is.status(),
+                    assertRejectsAgain(is,
                             name + ": the decode outcome is INVALID (chunk " + chunk + ")");
 
                     // Terminal: well-formed bytes fed afterwards change nothing.
@@ -281,7 +283,6 @@ class Utf8StrictTest {
                     assertThrows(SofabException.class,
                             () -> is.feed(new byte[] {0x08, 0x01}, record));
                     assertEquals(List.of(), events);
-                    assertEquals(DecodeStatus.INVALID, is.status());
                 }
             }));
         }
@@ -360,5 +361,25 @@ class Utf8StrictTest {
         assertTrue(Utf8.valid(payload, 0, payload.length),
                 "a String this corelib encoded must be well-formed UTF-8");
         assertEquals(value, new String(payload, StandardCharsets.UTF_8));
+    }
+
+    /**
+     * The verdict after a rejection, read where it now lives. INVALID travels on the
+     * error channel, and it is terminal (§5.2): the decoder decodes nothing further
+     * and throws the same code again, whatever it is fed. The probe message is a
+     * clean {@code unsigned id 0 = 42}, so the throw can only come from the latch.
+     */
+    private static void assertRejectsAgain(IStream is, String message) {
+        List<String> seen = new ArrayList<>();
+        Visitor probe = new Visitor() {
+            @Override
+            public void unsigned(int id, long value) {
+                seen.add(id + "=" + value);
+            }
+        };
+        SofabException e = assertThrows(SofabException.class,
+                () -> is.feed(bytes(0x00, 0x2A), probe), message);
+        assertEquals(SofabError.INVALID_MSG, e.error(), message);
+        assertEquals(List.of(), seen, message);
     }
 }

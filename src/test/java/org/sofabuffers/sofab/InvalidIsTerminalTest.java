@@ -7,11 +7,12 @@
  * be malformed, and no continuation of bytes may change that verdict. The status
  * a decode reports IS the answer; there is no finalize step that revises it.
  *
- * Before the fix IStream surfaced INVALID only as a thrown SofabException and kept
- * no record of it: status() answered COMPLETE right after the throw and a further
- * feed happily decoded the next bytes into the visitor - a caller whose loop logs
- * and continues on IOException resumed mid-stream on a message it had proven
- * malformed and finally read the verdict COMPLETE.
+ * Before the fix IStream kept no record of the rejection: a further feed happily
+ * decoded the next bytes into the visitor - a caller whose loop logs and continues
+ * on IOException resumed mid-stream on a message it had proven malformed, and read
+ * COMPLETE for it. INVALID travels on the error channel (§6.3), so what "latched"
+ * means is asserted where it is now readable: every further feed decodes nothing
+ * and throws INVALID_MSG again.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -19,7 +20,6 @@ package org.sofabuffers.sofab;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.sofabuffers.sofab.common.Wire.bytes;
 
 import java.io.UncheckedIOException;
@@ -37,16 +37,35 @@ class InvalidIsTerminalTest {
         assertEquals(SofabError.INVALID_MSG, e.error());
     }
 
+    /**
+     * The latched verdict, read the one way there is to read it: feed a message that
+     * would otherwise decode cleanly and assert the decoder refuses it under
+     * INVALID_MSG without handing the visitor anything. There is no status accessor
+     * to consult — the outcome travels with the feed call that produces it, and a
+     * terminal one keeps arriving on every later call.
+     */
+    private static void assertLatchedInvalid(IStream is) {
+        assertLatchedInvalid(is, "the verdict is latched INVALID");
+    }
+
+    private static void assertLatchedInvalid(IStream is, String message) {
+        RecordingVisitor probe = new RecordingVisitor();
+        SofabException e = assertThrows(SofabException.class,
+                () -> is.feed(bytes(0x00, 0x2A), probe), message);
+        assertEquals(SofabError.INVALID_MSG, e.error(), message);
+        assertEquals(List.of(), probe.events, message);
+    }
+
     // --- the verdict itself -------------------------------------------------
 
     @Test
-    void statusReportsInvalidAfterADanglingSequenceEnd() {
+    void rejectsAndLatchesADanglingSequenceEnd() {
         IStream is = new IStream();
         RecordingVisitor v = new RecordingVisitor();
 
         assertRejects(is, v, bytes(0x07));           // sequence end, no open sequence
 
-        assertEquals(DecodeStatus.INVALID, is.status());
+        assertLatchedInvalid(is);
     }
 
     /**
@@ -56,14 +75,14 @@ class InvalidIsTerminalTest {
      * the outcome for the bytes consumed so far is INVALID.
      */
     @Test
-    void statusReportsInvalidAfterAMalformedFixlenWordMidMessage() {
+    void rejectsAndLatchesAMalformedFixlenWordMidMessage() {
         IStream is = new IStream();
         RecordingVisitor v = new RecordingVisitor();
 
         assertRejects(is, v, bytes(0x08, 0x01, 0x12, 0x59));
 
         assertEquals(List.of("u:1=1"), v.events);
-        assertEquals(DecodeStatus.INVALID, is.status());
+        assertLatchedInvalid(is);
     }
 
     /** A malformed message that is ALSO truncated is INVALID, never INCOMPLETE. */
@@ -77,7 +96,7 @@ class InvalidIsTerminalTest {
         // the sequence still open.
         assertRejects(is, v, bytes(0x36, 0x22, 0x59));
 
-        assertEquals(DecodeStatus.INVALID, is.status());
+        assertLatchedInvalid(is);
     }
 
     // --- terminal: no continuation may revise it ----------------------------
@@ -94,7 +113,7 @@ class InvalidIsTerminalTest {
         assertRejects(is, v, bytes(0x00, 0x2A));
 
         assertEquals(List.of(), v.events);
-        assertEquals(DecodeStatus.INVALID, is.status());
+        assertLatchedInvalid(is);
     }
 
     @Test
@@ -108,7 +127,7 @@ class InvalidIsTerminalTest {
         SofabException e = assertThrows(SofabException.class, () -> is.feed(more, 1, 2, v));
         assertEquals(SofabError.INVALID_MSG, e.error());
         assertEquals(List.of(), v.events);
-        assertEquals(DecodeStatus.INVALID, is.status());
+        assertLatchedInvalid(is);
     }
 
     /** An empty feed is not a loophole: the verdict stands and the call still throws. */
@@ -120,7 +139,7 @@ class InvalidIsTerminalTest {
         assertRejects(is, v, bytes(0x07));
 
         assertRejects(is, v, new byte[0]);
-        assertEquals(DecodeStatus.INVALID, is.status());
+        assertLatchedInvalid(is);
     }
 
     /**
@@ -140,7 +159,7 @@ class InvalidIsTerminalTest {
             is.feed(bytes(0x28), v);                 // fixlen_word: (5 << 3) | fp32
         });
 
-        assertEquals(DecodeStatus.INVALID, is.status());
+        assertLatchedInvalid(is);
         assertRejects(is, v, bytes(0x00));
     }
 
@@ -161,7 +180,7 @@ class InvalidIsTerminalTest {
             IStream is = new IStream();
             RecordingVisitor v = new RecordingVisitor();
             assertRejects(is, v, m);
-            assertEquals(DecodeStatus.INVALID, is.status(), "not latched: " + hex(m));
+            assertLatchedInvalid(is, "not latched: " + hex(m));
             assertRejects(is, v, bytes(0x00, 0x2A));
         }
     }
@@ -176,7 +195,7 @@ class InvalidIsTerminalTest {
                 is.feed(open, v);
             }
         });
-        assertEquals(DecodeStatus.INVALID, is.status());
+        assertLatchedInvalid(is);
     }
 
     // --- reset() is the only way back ---------------------------------------
@@ -187,14 +206,15 @@ class InvalidIsTerminalTest {
         RecordingVisitor v = new RecordingVisitor();
 
         assertRejects(is, v, bytes(0x07));
-        assertEquals(DecodeStatus.INVALID, is.status());
+        assertLatchedInvalid(is);
 
         is.reset();
 
-        assertEquals(DecodeStatus.COMPLETE, is.status());
-        is.feed(bytes(0x00, 0x2A), v);
+        // A reset decoder is back at a clean field boundary, and the way to see that
+        // is to feed it: an empty feed no longer throws and answers COMPLETE.
+        assertEquals(DecodeStatus.COMPLETE, is.feed(new byte[0], v));
+        assertEquals(DecodeStatus.COMPLETE, is.feed(bytes(0x00, 0x2A), v));
         assertEquals(List.of("u:0=42"), v.events);
-        assertEquals(DecodeStatus.COMPLETE, is.status());
     }
 
     // --- what does NOT latch INVALID -----------------------------------------
@@ -205,12 +225,12 @@ class InvalidIsTerminalTest {
         IStream is = new IStream();
         RecordingVisitor v = new RecordingVisitor();
 
-        is.feed(bytes(0x80), v);                     // a dangling varint prefix
-        assertEquals(DecodeStatus.INCOMPLETE, is.status());
+        // a dangling varint prefix
+        assertEquals(DecodeStatus.INCOMPLETE, is.feed(bytes(0x80), v));
 
-        is.feed(bytes(0x01, 0x2A), v);               // ... completed by the next chunk
+        // ... completed by the next chunk
+        assertEquals(DecodeStatus.COMPLETE, is.feed(bytes(0x01, 0x2A), v));
         assertEquals(List.of("u:16=42"), v.events);
-        assertEquals(DecodeStatus.COMPLETE, is.status());
     }
 
     /**
@@ -233,7 +253,12 @@ class InvalidIsTerminalTest {
         UncheckedIOException e = assertThrows(UncheckedIOException.class,
                 () -> is.feed(bytes(0x00, 0x2A), limiter));
         assertEquals(SofabError.LIMIT_EXCEEDED, ((SofabException) e.getCause()).error());
-        assertTrue(is.status() != DecodeStatus.INVALID, "a policy limit is not INVALID");
+        // Latched, but under its own code: the repeat rejection is still
+        // LIMIT_EXCEEDED, never folded into INVALID_MSG (§6.3).
+        UncheckedIOException again = assertThrows(UncheckedIOException.class,
+                () -> is.feed(bytes(0x00, 0x2A), limiter));
+        assertEquals(SofabError.LIMIT_EXCEEDED, ((SofabException) again.getCause()).error(),
+                "a policy limit is not INVALID");
     }
 
     /**
@@ -257,12 +282,13 @@ class InvalidIsTerminalTest {
         UncheckedIOException e = assertThrows(UncheckedIOException.class,
                 () -> is.feed(bytes(0x00, 0x2A), failing));
         assertEquals("downstream sink failed", e.getCause().getMessage());
-        assertTrue(is.status() != DecodeStatus.INVALID, "a sink failure is not a wire verdict");
 
+        // Nothing latched, and that shows in the next feed: it decodes and answers
+        // for itself instead of re-throwing, as a latched INVALID would.
         RecordingVisitor v = new RecordingVisitor();
-        is.feed(bytes(0x08, 0x07), v);
+        assertEquals(DecodeStatus.COMPLETE, is.feed(bytes(0x08, 0x07), v),
+                "a sink failure is not a wire verdict");
         assertEquals(List.of("u:1=7"), v.events);
-        assertEquals(DecodeStatus.COMPLETE, is.status());
     }
 
     /**
@@ -287,7 +313,7 @@ class InvalidIsTerminalTest {
         assertThrows(UncheckedIOException.class,
                 () -> is.feed(bytes(0x02, 0x1A, 0x61, 0x62, 0x63), bound));
 
-        assertEquals(DecodeStatus.INVALID, is.status());
+        assertLatchedInvalid(is);
         assertRejects(is, bound, bytes(0x00, 0x2A));
     }
 

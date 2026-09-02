@@ -100,14 +100,14 @@ class StreamingArrayFastPathTest {
 
         Sum actual = new Sum();
         IStream is = new IStream();
-        is.feed(msg, 0, head, actual);
+        DecodeStatus after = is.feed(msg, 0, head, actual);
         int boundaries = 1; // the one just fed
         for (int p = head; p < msg.length; p += 800) { // 100 whole elements per chunk
-            is.feed(msg, p, Math.min(800, msg.length - p), actual);
+            after = is.feed(msg, p, Math.min(800, msg.length - p), actual);
             boundaries++;
         }
 
-        assertEquals(DecodeStatus.COMPLETE, is.status());
+        assertEquals(DecodeStatus.COMPLETE, after);
         assertEquals(expected, actual);
         assertTrue(is.machineBytes <= 8L * boundaries,
                 "a chunk boundary between elements must cost the byte-at-a-time machine at most "
@@ -147,13 +147,14 @@ class StreamingArrayFastPathTest {
         for (int chunk : new int[] {997, 4096, 65536}) {
             Sum actual = new Sum();
             IStream is = new IStream();
+            DecodeStatus after = null;
             for (int p = 0; p < msg.length; p += chunk) {
-                is.feed(msg, p, Math.min(chunk, msg.length - p), actual);
+                after = is.feed(msg, p, Math.min(chunk, msg.length - p), actual);
             }
             int boundaries = (msg.length + chunk - 1) / chunk;
             long budget = (long) SLOW_BYTES_PER_BOUNDARY * boundaries;
 
-            assertEquals(DecodeStatus.COMPLETE, is.status(), "chunk " + chunk);
+            assertEquals(DecodeStatus.COMPLETE, after, "chunk " + chunk);
             assertEquals(expected, actual, "chunk " + chunk + " decoded differently");
             assertTrue(is.machineBytes <= budget,
                     "chunk " + chunk + ": " + is.machineBytes + " of " + msg.length + " bytes went "

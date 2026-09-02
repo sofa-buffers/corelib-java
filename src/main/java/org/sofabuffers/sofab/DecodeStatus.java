@@ -1,17 +1,17 @@
 /*
- * SofaBuffers Java - decode outcome: the three of MESSAGE_SPEC §7, plus the
- * fourth CORELIB_PLAN §6.3 allows for a receiver-limit rejection.
+ * SofaBuffers Java - decode outcome: the three of MESSAGE_SPEC §7, of which
+ * `feed` returns the two that are not a refusal.
  *
  * SPDX-License-Identifier: MIT
  */
 package org.sofabuffers.sofab;
 
 /**
- * The terminal outcome of a decode, per the finish-less three-valued model in
- * MESSAGE_SPEC §7, plus the fourth outcome CORELIB_PLAN §6.3 allows for a
- * receiver-limit rejection. They are identical for one-shot and streaming
- * decodes, and there is <b>no</b> finish/finalize step: the caller owns
- * end-of-input.
+ * The outcome of a decode, per the finish-less three-valued model of
+ * CORELIB_PLAN §5.2.1 / MESSAGE_SPEC §7. It is identical for one-shot and
+ * streaming decodes, it describes the bytes consumed <b>so far</b>, and there is
+ * <b>no</b> finish/finalize step: "the status {@code feed} returns <em>is</em> the
+ * answer" (§5.2.4), and the caller owns end-of-input.
  *
  * <ul>
  *   <li>{@link #COMPLETE} — the consumed bytes end exactly at a field boundary
@@ -24,21 +24,21 @@ package org.sofabuffers.sofab;
  *   <li>{@link #INVALID} — the bytes are malformed regardless of what follows
  *       (varint over 64 bits, bad type/subtype tag, length/count/id over max,
  *       dangling sequence-end, nesting past {@code MAX_DEPTH}, invalid UTF-8).
- *       Malformed input surfaces as a thrown
- *       {@link SofabException} carrying {@link SofabError#INVALID_MSG}, and the
- *       decoder latches it: {@link IStream#status()} returns this constant from
- *       then on. It outranks the other two — input that is both malformed and
- *       truncated is {@code INVALID}, never {@code INCOMPLETE} — and it is
- *       <b>terminal</b>: no further bytes can revise it, only
- *       {@link IStream#reset()} starting a new message.</li>
- *   <li>{@link #LIMIT_EXCEEDED} — the bytes are well-formed, and a receiver-side
- *       limit (§6.2.1) refused them. §6.3 leaves the surfacing open, "either a
- *       fourth decode outcome, or a terminal failure carrying the
- *       {@code LimitExceeded} code on the error channel"; this library does both,
- *       because a status accessor has no error channel — and either way the
- *       rejection <b>MUST NOT</b> be reported as {@code InvalidMessage}, which is
- *       why it is not {@link #INVALID}. Terminal like {@code INVALID}.</li>
+ *       It names the third outcome; it is not a value {@link IStream#feed}
+ *       returns, because this library carries a refusal on the error channel —
+ *       see below.</li>
  * </ul>
+ *
+ * <p><b>Which of the three {@code feed} returns.</b> {@link IStream#feed} returns
+ * {@code COMPLETE} or {@code INCOMPLETE} — the two outcomes more bytes can still
+ * change. {@code INVALID} arrives instead as a thrown {@link SofabException}
+ * carrying {@link SofabError#INVALID_MSG}, the code §6.3 pairs with this outcome
+ * ("{@code INVALID} corresponds to {@code InvalidMessage}"), and the same
+ * exception channel carries {@link SofabError#LIMIT_EXCEEDED}, the receiver-cap
+ * refusal of well-formed bytes that §6.3 keeps distinct from it. §6.0 names the
+ * three outcomes; it does not prescribe the carrier, and refusals leave by the
+ * one route a Java caller cannot ignore. Both are terminal: the decoder latches
+ * them and every further {@code feed} re-throws until {@link IStream#reset()}.
  */
 public enum DecodeStatus {
     /** The consumed bytes end exactly at a field boundary — a valid message. */
@@ -51,23 +51,11 @@ public enum DecodeStatus {
     INCOMPLETE,
 
     /**
-     * The bytes are malformed regardless of what follows. Surfaced as a thrown
-     * {@link SofabException} with {@link SofabError#INVALID_MSG} and then latched:
-     * {@link IStream#status()} reports it until {@link IStream#reset()}, and no
-     * continuation can change it back.
+     * The bytes are malformed regardless of what follows — the third outcome of
+     * §5.2.1, and the one {@link IStream#feed} does not return: it throws a
+     * {@link SofabException} with {@link SofabError#INVALID_MSG} instead, then
+     * latches the verdict so no continuation can revise it and every further
+     * {@code feed} throws again until {@link IStream#reset()}.
      */
     INVALID,
-
-    /**
-     * The bytes are well-formed but a receiver-configured limit (§6.2.1) refused
-     * them — "a terminal, receiver-local policy rejection" (§6.3). Surfaced as a
-     * thrown {@link SofabException} with {@link SofabError#LIMIT_EXCEEDED},
-     * wrapped in an {@link java.io.UncheckedIOException} where a {@link Visitor}
-     * callback raised it, and then latched: {@link IStream#status()} reports this
-     * constant until {@link IStream#reset()}, and every further
-     * {@link IStream#feed} repeats the rejection rather than decoding on. Kept
-     * apart from {@link #INVALID} because the same message decodes under a looser
-     * limit, and §6.3 forbids reporting it as {@code InvalidMessage}.
-     */
-    LIMIT_EXCEEDED,
 }

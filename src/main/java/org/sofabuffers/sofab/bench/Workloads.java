@@ -347,8 +347,7 @@ final class Workloads {
         }));
         ws.add(new Workload("decode_composite_skip", "decode: composite skip-all", compWire.length, () -> {
             IStream is = new IStream();
-            is.feed(compWire, SKIP_ALL);
-            return is.status().ordinal();
+            return is.feed(compWire, SKIP_ALL).ordinal();
         }));
         return ws;
     }

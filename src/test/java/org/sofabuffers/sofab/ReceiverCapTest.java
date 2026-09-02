@@ -334,8 +334,8 @@ class ReceiverCapTest {
      * not the {@code INVALID} outcome: the same message decodes for a receiver
      * configured with a looser limit, and calling it malformed would report a wire
      * divergence where there is none. {@link IStream} latches it all the same —
-     * §6.3 calls it terminal — but under its own code, so {@code status()}
-     * answers {@link DecodeStatus#LIMIT_EXCEEDED}; that half is pinned by
+     * §6.3 calls it terminal — but under its own code, which the exception keeps
+     * and every further feed repeats; that half is pinned by
      * {@code LimitExceededIsTerminalTest}.
      */
     @Test
@@ -345,7 +345,11 @@ class ReceiverCapTest {
         UncheckedIOException e = assertThrows(UncheckedIOException.class,
                 () -> in.feed(msg, new CappedVisitor(CAP)));
         assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(e));
-        assertNotEquals(DecodeStatus.INVALID, in.status(),
+        // The latched verdict keeps that code too: asking again (an empty feed adds
+        // no bytes) repeats LIMIT_EXCEEDED and never INVALID_MSG.
+        UncheckedIOException again = assertThrows(UncheckedIOException.class,
+                () -> in.feed(new byte[0], new CappedVisitor(CAP)));
+        assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(again),
                 "well-formed bytes this receiver declines are not malformed bytes");
     }
 

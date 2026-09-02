@@ -117,8 +117,7 @@ class ReadmeGeneratedObjectApiTest {
             private final IStream is = new IStream();
 
             public DecodeStatus feed(byte[] chunk, int off, int len) throws SofabException {
-                is.feed(chunk, off, len, p);
-                return is.status();          // COMPLETE / INCOMPLETE; INVALID and LIMIT_EXCEEDED throw
+                return is.feed(chunk, off, len, p);  // COMPLETE / INCOMPLETE; a refusal throws
             }
 
             public Point message() { return p; }

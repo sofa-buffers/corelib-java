@@ -224,10 +224,11 @@ class BenchSpecTest {
         byte[] wire = oneShotBlob(Workloads.makeBlob());
         Chunks seen = new Chunks();
         IStream is = new IStream();
+        DecodeStatus after = null;
         for (int off = 0; off < wire.length; off += Workloads.STREAM_BUFFER) {
-            is.feed(wire, off, Math.min(Workloads.STREAM_BUFFER, wire.length - off), seen);
+            after = is.feed(wire, off, Math.min(Workloads.STREAM_BUFFER, wire.length - off), seen);
         }
-        assertEquals(DecodeStatus.COMPLETE, is.status());
+        assertEquals(DecodeStatus.COMPLETE, after);
         assertEquals(1_000_000, seen.bytes, "the whole payload arrived");
         assertTrue(seen.calls >= 244,
                 "a payload delivered in one piece is not a streaming decode: " + seen.calls);

@@ -63,12 +63,17 @@ public final class Decode {
      */
     public static String verdict(byte[] data, Visitor sink, int chunk) {
         IStream in = new IStream();
+        // The outcome is what the LAST feed returned (§5.2.4) — every feed answers
+        // for the bytes consumed so far, so the final one answers for all of them.
+        // A fresh decoder that is never fed at all (empty data, chunked) is at a
+        // clean field boundary: that is the empty message, COMPLETE.
+        DecodeStatus st = DecodeStatus.COMPLETE;
         try {
             if (chunk <= 0) {
-                in.feed(data, sink);
+                st = in.feed(data, sink);
             } else {
                 for (int i = 0; i < data.length; i += chunk) {
-                    in.feed(data, i, Math.min(chunk, data.length - i), sink);
+                    st = in.feed(data, i, Math.min(chunk, data.length - i), sink);
                 }
             }
         } catch (SofabException e) {
@@ -78,6 +83,6 @@ public final class Decode {
             // signature declares no checked exception.
             return "R:" + ((SofabException) e.getCause()).error();
         }
-        return in.status() == DecodeStatus.COMPLETE ? "A" : "I";
+        return st == DecodeStatus.COMPLETE ? "A" : "I";
     }
 }

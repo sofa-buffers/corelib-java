@@ -27,9 +27,9 @@
  */
 package org.sofabuffers.sofab;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.sofabuffers.sofab.common.Wire.bytes;
@@ -174,7 +174,7 @@ class Utf8ChunkOffsetTest {
                         () -> is.feed(wire, sink),
                         name + ": an invalid string must be rejected wherever it sits");
                 assertEquals(SofabError.INVALID_MSG, ((SofabException) e.getCause()).error());
-                assertEquals(DecodeStatus.INVALID, is.status());
+                assertRejectsAgain(is, name + ": the rejection is terminal");
                 assertTrue(sink.sawFieldPastItsOwnLength(),
                         name + ": this case only closes the gap if chunkOffset >= total");
                 assertEquals(List.of(), sink.strings, name + ": nothing may be materialized");
@@ -188,7 +188,7 @@ class Utf8ChunkOffsetTest {
                         chunked.feed(new byte[] {b}, chunkedSink);
                     }
                 }, name + ": chunking must not change the verdict");
-                assertEquals(DecodeStatus.INVALID, chunked.status());
+                assertRejectsAgain(chunked, name + ": the rejection is terminal, chunked too");
             }));
         }
         assertTrue(tests.size() >= 11, "expected the shared invalid_utf8 vectors");
@@ -209,9 +209,8 @@ class Utf8ChunkOffsetTest {
 
         IStream is = new IStream();
         ZeroCopyStrictStrings sink = new ZeroCopyStrictStrings();
-        is.feed(wire, sink);
 
-        assertEquals(DecodeStatus.COMPLETE, is.status());
+        assertEquals(DecodeStatus.COMPLETE, is.feed(wire, sink));
         assertEquals(List.of("äö😀"), sink.strings);
         assertTrue(sink.sawFieldPastItsOwnLength(),
                 "the control must sit where the negative cases sit");
@@ -252,15 +251,16 @@ class Utf8ChunkOffsetTest {
 
         IStream is = new IStream();
         ZeroCopyStrictStrings sink = new ZeroCopyStrictStrings();
+        DecodeStatus after = null;
         for (int i = 0; i < wire.length; i++) {
-            is.feed(wire, i, 1, sink);
-            if (i < wire.length - 1) {
-                assertNotEquals(DecodeStatus.INVALID, is.status(),
-                        "a sequence split at byte " + i + " is incomplete, not malformed");
-            }
+            final int at = i;
+            // Not malformed: a split byte returns an outcome instead of throwing,
+            // which is the only way INVALID could be reported.
+            after = assertDoesNotThrow(() -> is.feed(wire, at, 1, sink),
+                    "a sequence split at byte " + i + " is incomplete, not malformed");
         }
 
-        assertEquals(DecodeStatus.COMPLETE, is.status());
+        assertEquals(DecodeStatus.COMPLETE, after);
         assertEquals(List.of("a€😀b"), sink.strings);
     }
 
@@ -281,15 +281,15 @@ class Utf8ChunkOffsetTest {
         IStream is = new IStream();
         ZeroCopyStrictStrings sink = new ZeroCopyStrictStrings();
 
-        is.feed(wire, 0, wire.length - 2, sink);        // everything but the bad pair
-        assertEquals(DecodeStatus.INCOMPLETE, is.status(),
+        // everything but the bad pair
+        assertEquals(DecodeStatus.INCOMPLETE, is.feed(wire, 0, wire.length - 2, sink),
                 "well-formed bytes so far - the verdict cannot be INVALID yet");
         assertEquals(List.of(), sink.strings);
 
         UncheckedIOException e = assertThrows(UncheckedIOException.class,
                 () -> is.feed(wire, wire.length - 2, 2, sink));
         assertEquals(SofabError.INVALID_MSG, ((SofabException) e.getCause()).error());
-        assertEquals(DecodeStatus.INVALID, is.status());
+        assertRejectsAgain(is, "an invalid payload is terminal");
     }
 
     /**
@@ -303,8 +303,27 @@ class Utf8ChunkOffsetTest {
         byte[] wire = late(hex("0212c080"));
 
         IStream is = new IStream();
-        is.feed(wire, new Visitor() { });
 
-        assertEquals(DecodeStatus.COMPLETE, is.status());
+        assertEquals(DecodeStatus.COMPLETE, is.feed(wire, new Visitor() { }));
+    }
+
+    /**
+     * The verdict after a rejection, read where it now lives. INVALID travels on the
+     * error channel, and it is terminal (§5.2): the decoder decodes nothing further
+     * and throws the same code again, whatever it is fed. The probe message is a
+     * clean {@code unsigned id 0 = 42}, so the throw can only come from the latch.
+     */
+    private static void assertRejectsAgain(IStream is, String message) {
+        List<String> seen = new ArrayList<>();
+        Visitor probe = new Visitor() {
+            @Override
+            public void unsigned(int id, long value) {
+                seen.add(id + "=" + value);
+            }
+        };
+        SofabException e = assertThrows(SofabException.class,
+                () -> is.feed(bytes(0x00, 0x2A), probe), message);
+        assertEquals(SofabError.INVALID_MSG, e.error(), message);
+        assertEquals(List.of(), seen, message);
     }
 }

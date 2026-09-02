@@ -13,26 +13,27 @@
  *
  * IStream.feed latches the code of whichever rejection ended the decode, and
  * LIMIT_EXCEEDED is one of the two that end one (INVALID_MSG is the other). A cap
- * refusal therefore closes the decode: status() answers DecodeStatus.LIMIT_EXCEEDED,
- * every further feed repeats the refusal under that same code instead of decoding
- * on, and only reset() starts a new message. Without that latch the decoder was
- * left parked mid-field, status() answered COMPLETE, and a further feed re-entered
- * header parsing at a desynchronised position, handing the refused payload's own
- * bytes to the visitor as fields the sender never wrote ('h' = 0x68 -> id 13, wire
- * type 0; 'e' = 0x65 -> the value 101). That last part is why the finding is
- * critical: the receiver acts on data no sender sent.
+ * refusal therefore closes the decode: every further feed repeats the refusal under
+ * that same code instead of decoding on, and only reset() starts a new message.
+ * Without that latch the decoder was left parked mid-field, reported the message
+ * COMPLETE, and a further feed re-entered header parsing at a desynchronised
+ * position, handing the refused payload's own bytes to the visitor as fields the
+ * sender never wrote ('h' = 0x68 -> id 13, wire type 0; 'e' = 0x65 -> the value
+ * 101). That last part is why the finding is critical: the receiver acts on data no
+ * sender sent.
  *
  * These tests are the mirror image of InvalidIsTerminalTest, which pins the same
- * property for the malformed-bytes outcome. They deliberately do not name the
- * constant status() should report, because §6.3 leaves that choice to the port;
- * they only pin that it is neither of the two non-terminal ones.
+ * property for the malformed-bytes outcome. Of §6.3's two surfacings - "a fourth
+ * decode outcome, or a terminal failure carrying the LimitExceeded code on the
+ * error channel" - this port takes the second, so the verdict is asked for the only
+ * way it can be: by feeding again. A refused decoder answers with the refusal, not
+ * with either of the two non-terminal outcomes.
  *
  * SPDX-License-Identifier: MIT
  */
 package org.sofabuffers.sofab;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.sofabuffers.sofab.common.Decode.CHUNKS;
 import static org.sofabuffers.sofab.common.Wire.bytes;
@@ -181,15 +182,21 @@ class LimitExceededIsTerminalTest {
      * which §5.2.3 reserves for input a continuation may still complete.
      */
     @Test
-    void statusIsTerminalAfterALimitRefusal_CORELIB_JAVA_10() throws IOException {
+    void theOutcomeIsTerminalAfterALimitRefusal_CORELIB_JAVA_10() throws IOException {
         for (int chunk : CHUNKS) {
-            DecodeStatus after = refused(new Capping(), chunk).status();
+            Capping v = new Capping();
+            IStream in = refused(v, chunk);
 
-            assertNotEquals(DecodeStatus.COMPLETE, after,
-                    FINDING + ": a refused message did not complete (§6.3, §5.2.1), chunk=" + chunk);
-            assertNotEquals(DecodeStatus.INCOMPLETE, after,
-                    FINDING + ": a refused message must not invite more bytes (§6.3, §5.2.3), chunk="
-                            + chunk);
+            // Asking again is the only way to ask: the outcome travels with the
+            // feed call. An empty feed adds no bytes and so puts exactly the old
+            // question - "where do I stand?" - and a refused decode answers it with
+            // the refusal rather than with COMPLETE or INCOMPLETE.
+            UncheckedIOException after = assertThrows(UncheckedIOException.class,
+                    () -> in.feed(new byte[0], v),
+                    FINDING + ": a refused message neither completed (§6.3, §5.2.1) nor may "
+                            + "invite more bytes (§6.3, §5.2.3), chunk=" + chunk);
+            assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(after),
+                    FINDING + ": the refusal keeps its own code (§6.3), chunk=" + chunk);
         }
     }
 
@@ -262,7 +269,11 @@ class LimitExceededIsTerminalTest {
     void wholeAndChunkedFeedsAgreeAfterALimitRefusal_CORELIB_JAVA_10() throws IOException {
         Set<String> verdicts = new LinkedHashSet<>();
         for (int chunk : CHUNKS) {
-            verdicts.add(chunk + " -> " + refused(new Capping(), chunk).status());
+            Capping v = new Capping();
+            IStream in = refused(v, chunk);
+            UncheckedIOException after = assertThrows(UncheckedIOException.class,
+                    () -> in.feed(new byte[0], v));
+            verdicts.add(chunk + " -> " + categoryOf(after));
         }
         assertEquals(1, verdicts.stream().map(s -> s.substring(s.indexOf("-> "))).distinct().count(),
                 FINDING + ": the two decode surfaces disagree after the same refusal: " + verdicts);

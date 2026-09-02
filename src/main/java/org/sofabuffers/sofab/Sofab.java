@@ -85,10 +85,10 @@ public final class Sofab {
      * visitor and not this library. So the rejection travels as an unchecked
      * wrapper, and {@link IStream#feed} recognizes it on the way out: an
      * {@code INVALID_MSG} raised by a visitor latches the decode exactly as one
-     * raised by the decoder itself does, so it is terminal and {@code status()}
-     * reports {@link DecodeStatus#INVALID} from then on (CORELIB_PLAN §5.2). The
-     * wrapper itself reaches the caller unchanged; the {@link SofabException} is
-     * its {@code cause}.
+     * raised by the decoder itself does, so it is terminal: every later
+     * {@link IStream#feed} re-throws it and none returns a status (CORELIB_PLAN
+     * §5.2). The wrapper itself reaches the caller unchanged; the
+     * {@link SofabException} is its {@code cause}.
      *
      * <p>That makes it a two-sided contract, and this is the side that names it.
      * Throw the result rather than calling it for effect — {@code throw
@@ -124,9 +124,9 @@ public final class Sofab {
      * <b>terminal</b> (§6.3: "a terminal, receiver-local policy rejection") and
      * {@link IStream#feed} latches both, so the decode ends there and every later
      * call repeats the rejection until {@link IStream#reset()}; what keeps them
-     * apart is the code they keep — a limit rejection is never folded into
-     * {@link DecodeStatus#INVALID} (it answers {@link DecodeStatus#LIMIT_EXCEEDED})
-     * and is never clamped or truncated into a shortened value.
+     * apart is the code they keep — a limit rejection is never reported as
+     * {@code INVALID_MSG} (§6.3), and is never clamped or truncated into a
+     * shortened value.
      *
      * <p>Raised from two places, and only where a cap was actually supplied:
      * {@link PayloadAcc#string} / {@link PayloadAcc#blob} at a payload's announced

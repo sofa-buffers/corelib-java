@@ -53,23 +53,34 @@ import static org.sofabuffers.sofab.WireFormat.zigzagDecode;
  * its length word, before any payload byte, so a length bound can be enforced
  * there rather than after the payload assembles.
  *
- * <p><b>Three-valued outcome (MESSAGE_SPEC §7).</b> Malformed bytes throw a
- * {@link SofabException} with {@link SofabError#INVALID_MSG} from {@code feed}.
- * Running out of bytes mid-field is <em>not</em> an error: {@code feed} suspends
- * and returns normally, and a subsequent {@code feed} resumes it. To tell a
- * message that is <em>complete</em> from one that was <em>truncated</em>, call
- * {@link #status()} after the final {@code feed}: it returns
- * {@link DecodeStatus#COMPLETE} at a clean field boundary or
- * {@link DecodeStatus#INCOMPLETE} if the last bytes ended inside a field or with
- * an open (unclosed) sequence. {@code status()} is a pure, non-throwing accessor
- * — there is no required finish/finalize step; the caller owns end-of-input.
+ * <p><b>One question, one answer: the outcome is what {@code feed} returns</b>
+ * (CORELIB_PLAN §5.2.4, "the status {@code feed}/{@code decode} returns <em>is</em>
+ * the answer"). Every {@code feed} reports on the bytes consumed <em>so far</em>:
+ * {@link DecodeStatus#COMPLETE} when they end exactly at a field boundary with no
+ * open sequence, {@link DecodeStatus#INCOMPLETE} when they end inside a field — a
+ * partial varint, a fixlen/array payload shorter than declared, an array with
+ * elements still pending — or with an open (unclosed) nested sequence. There is no
+ * second way to ask and no finish/finalize step; the caller owns end-of-input and
+ * decides whether a trailing {@code INCOMPLETE} is a truncation it cares about.
  *
- * <p><b>{@code INVALID} is terminal.</b> Malformed bytes are malformed regardless
- * of what follows, so a rejection sticks: {@code status()} answers
- * {@link DecodeStatus#INVALID} from then on and every further {@code feed} throws
- * {@link SofabError#INVALID_MSG} without decoding, so a caller that catches the
- * exception and keeps feeding cannot resume mid-stream on a message the decoder
- * has already proven broken, nor read a {@code COMPLETE} verdict for it.
+ * <p><b>{@code INCOMPLETE} is not an error.</b> Running out of bytes mid-field
+ * suspends the decode and returns normally; the next {@code feed} resumes it at
+ * the byte it stopped on.
+ *
+ * <p><b>A refusal travels on the error channel, carrying its code.</b> Malformed
+ * bytes — the {@code INVALID} outcome of §5.2, {@code InvalidMessage} in §6.3's
+ * table — throw {@link SofabException} with {@link SofabError#INVALID_MSG}; a
+ * receiver-cap rejection of <em>well-formed</em> bytes (§6.2.1) throws
+ * {@link SofabError#LIMIT_EXCEEDED}, the code §6.3 keeps distinct from it. Neither
+ * is ever <em>returned</em>: a rejected decode leaves through the {@code throw},
+ * which is the one place the caller learns of it.
+ *
+ * <p><b>Both rejections are terminal.</b> Malformed bytes are malformed regardless
+ * of what follows (§5.2), and a limit rejection is "a terminal, receiver-local
+ * policy rejection" (§6.3), so the verdict sticks: every further {@code feed}
+ * re-throws the same code without decoding a byte. A caller that catches the
+ * exception and keeps feeding therefore cannot resume mid-stream on a message the
+ * decoder has already refused, nor read a {@code COMPLETE} out of it.
  * {@link #reset()} — resynchronising onto the next message — is what clears it.
  *
  * <p>This class is not thread-safe; decode one message from one thread. Reuse an
@@ -85,8 +96,7 @@ import static org.sofabuffers.sofab.WireFormat.zigzagDecode;
  * }
  * Sink sink = new Sink();
  * IStream is = new IStream();
- * is.feed(buf, sink);
- * if (is.status() == DecodeStatus.INCOMPLETE) {
+ * if (is.feed(buf, sink) == DecodeStatus.INCOMPLETE) {
  *     // buf ended mid-message; wait for more bytes (or treat as truncation).
  * }
  * }</pre>
@@ -227,9 +237,8 @@ public final class IStream {
      * flag because §6.3 forbids ever reporting the second as {@code InvalidMessage}.
      * Set from {@link #feed}'s handler on the way out, so every rejection latches,
      * wherever it is raised (in this class, or by the {@link Visitor} generated
-     * code drives). Once set, {@link #status()} answers the matching terminal
-     * outcome and {@code feed} refuses further bytes until {@link #reset()} starts
-     * a new message.
+     * code drives). Once set, {@code feed} decodes nothing further and re-throws
+     * this code until {@link #reset()} starts a new message.
      */
     private SofabError terminal;
 
@@ -267,8 +276,8 @@ public final class IStream {
      * must not be called mid-message unless that is the intent — after an
      * {@link SofabError#INVALID_MSG} it is exactly how a stream decoder
      * resynchronises onto the next message, and the <em>only</em> way: that outcome
-     * is terminal (CORELIB_PLAN §5.2), so until this call {@link #status()} keeps
-     * answering {@link DecodeStatus#INVALID} and {@link #feed} keeps refusing bytes.
+     * is terminal (CORELIB_PLAN §5.2), so until this call {@link #feed} decodes
+     * nothing and keeps re-throwing the rejection.
      *
      * <p>{@link #acc} keeps its allocation — it is sized once at construction and
      * never re-made — and only its first {@code accLen} bytes are ever read,
@@ -306,100 +315,60 @@ public final class IStream {
     }
 
     /**
-     * Report whether the bytes fed so far end exactly at a field boundary. Call
-     * after the final {@link #feed}: returns {@link DecodeStatus#COMPLETE} when the
-     * decoder is at a clean field boundary with no open sequence, or
-     * {@link DecodeStatus#INCOMPLETE} when the last bytes ended inside a field — a
-     * partial varint (field header or value), a fixlen/array payload shorter than
-     * declared, an array with elements still pending — or with an open (unclosed)
-     * nested sequence ({@code depth != 0}).
-     *
-     * <p>A <em>malformed</em> message answers {@link DecodeStatus#INVALID}, which
-     * outranks both other outcomes and is <b>terminal</b> (CORELIB_PLAN §5.2):
-     * {@link #feed} threw {@link SofabError#INVALID_MSG} when it read the malformed
-     * construct and the verdict is latched from there on, so no continuation — and
-     * in particular no later {@code feed} that would have ended at a clean field
-     * boundary — can turn it back into {@code COMPLETE} or {@code INCOMPLETE}.
-     * {@link #reset()} clears it, because that starts a new message.
-     *
-     * <p>A message a receiver <em>limit</em> refused (§6.2.1) answers
-     * {@link DecodeStatus#LIMIT_EXCEEDED}, latched and terminal in exactly the same
-     * way — §6.3 calls it "a terminal, receiver-local policy rejection" — but a
-     * separate outcome, because the bytes are well-formed and §6.3 <b>MUST NOT</b>
-     * have them reported as {@code InvalidMessage}.
-     *
-     * <p>Per the finish-less spec (MESSAGE_SPEC §7) this is a pure accessor: it
-     * never throws, never mutates decoder state, and never promotes an incomplete
-     * decode to an error. The caller owns end-of-input and decides whether a
-     * trailing {@code INCOMPLETE} is a truncation it cares about.
-     *
-     * @return {@link DecodeStatus#INVALID} once any fed bytes were rejected as
-     *         malformed, {@link DecodeStatus#LIMIT_EXCEEDED} once a receiver limit
-     *         refused them, else {@link DecodeStatus#COMPLETE} at a clean boundary,
-     *         otherwise {@link DecodeStatus#INCOMPLETE}
-     */
-    public DecodeStatus status() {
-        // A latched rejection first: it is a property of bytes already consumed
-        // and no later state can revise it (§5.2, "INVALID wins over INCOMPLETE"
-        // and terminal; §6.3 for the policy rejection, terminal just the same).
-        // The two stay distinct outcomes — §6.3 MUST NOT fold a limit rejection
-        // into INVALID.
-        if (terminal == SofabError.LIMIT_EXCEEDED) {
-            return DecodeStatus.LIMIT_EXCEEDED;
-        }
-        if (terminal != null) {
-            return DecodeStatus.INVALID;
-        }
-        // COMPLETE only at a true field boundary: no partial field header varint
-        // (that is its own state, S_HEADER), no in-progress value/payload/array
-        // element (S_IDLE covers the resumable machine and mid-array between
-        // elements), and every opened sequence closed (depth == 0). Anything else
-        // means the bytes ended inside a field or an open sequence — INCOMPLETE.
-        if (state == S_IDLE && depth == 0) {
-            return DecodeStatus.COMPLETE;
-        }
-        return DecodeStatus.INCOMPLETE;
-    }
-
-    /**
      * Feed a whole chunk of encoded bytes, pushing decoded fields to
-     * {@code visitor}.
+     * {@code visitor}, and report where the decode stands.
      *
      * @param data    encoded bytes
      * @param visitor sink for decoded fields
+     * @return {@link DecodeStatus#COMPLETE} when the bytes consumed so far end at a
+     *         clean field boundary with no open sequence, else
+     *         {@link DecodeStatus#INCOMPLETE}
      * @throws SofabException with {@link SofabError#INVALID_MSG} on malformed input
      */
-    public void feed(byte[] data, Visitor visitor) throws SofabException {
-        feed(data, 0, data.length, visitor);
+    public DecodeStatus feed(byte[] data, Visitor visitor) throws SofabException {
+        return feed(data, 0, data.length, visitor);
     }
 
     /**
-     * Feed a slice of encoded bytes, pushing decoded fields to {@code visitor}.
-     * Decoding can continue across many {@code feed} calls; the decoder keeps
-     * all state internally.
+     * Feed a slice of encoded bytes, pushing decoded fields to {@code visitor}, and
+     * report where the decode stands. Decoding can continue across many
+     * {@code feed} calls; the decoder keeps all state internally.
      *
-     * <p>The {@link SofabError#INVALID_MSG} outcome is <b>terminal</b>
-     * (CORELIB_PLAN §5.2): once any fed bytes have been rejected as malformed, this
-     * method decodes nothing further and rethrows {@code INVALID_MSG} for every
-     * subsequent call, and {@link #status()} keeps reporting
-     * {@link DecodeStatus#INVALID}, until {@link #reset()} begins a new message.
-     * {@link SofabError#LIMIT_EXCEEDED} is terminal too (§6.3) and behaves the same
-     * way, rethrown in the carrier it arrived in and reported by {@code status()}
-     * as {@link DecodeStatus#LIMIT_EXCEEDED} — never as {@code INVALID}.
-     * Running out of bytes mid-field is <em>not</em> that: it suspends and resumes
-     * on the next call, as before.
+     * <p><b>The returned status is the answer</b> (CORELIB_PLAN §5.2.4). It
+     * describes the bytes consumed <em>so far</em>, not just this slice:
+     * {@link DecodeStatus#COMPLETE} at a clean field boundary with every opened
+     * sequence closed, {@link DecodeStatus#INCOMPLETE} when the bytes ended inside
+     * a field — a partial varint (field header or value), a fixlen/array payload
+     * shorter than declared, an array with elements still pending — or with an open
+     * nested sequence. {@code INCOMPLETE} is not an error and needs no finish step
+     * to resolve: the decode suspends, the next call resumes it, and the caller
+     * owns end-of-input.
+     *
+     * <p><b>A rejection leaves by the exception, never by the return.</b> The
+     * {@link SofabError#INVALID_MSG} outcome is <b>terminal</b> (CORELIB_PLAN §5.2):
+     * once any fed bytes have been rejected as malformed, this method decodes
+     * nothing further and rethrows {@code INVALID_MSG} for every subsequent call
+     * until {@link #reset()} begins a new message.
+     * {@link SofabError#LIMIT_EXCEEDED} — a receiver-cap refusal of well-formed
+     * bytes (§6.2.1) — is terminal too (§6.3) and behaves the same way, rethrown in
+     * the carrier it arrived in and under its own code, never folded into
+     * {@code INVALID_MSG}. Running out of bytes mid-field is <em>not</em> that: it
+     * suspends and resumes on the next call, as before.
      *
      * @param data    backing array
      * @param off     start offset
      * @param len     number of bytes to consume
      * @param visitor sink for decoded fields
+     * @return {@link DecodeStatus#COMPLETE} when the bytes consumed so far end at a
+     *         clean field boundary with no open sequence, else
+     *         {@link DecodeStatus#INCOMPLETE}
      * @throws SofabException with {@link SofabError#INVALID_MSG} on malformed input,
      *         or on any call after malformed input was already rejected
      * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
-     *         {@link SofabException} on any call after a receiver limit refused
-     *         this message
+     *         {@link SofabException} where a receiver limit refuses this message,
+     *         and on every call after that
      */
-    public void feed(byte[] data, int off, int len, Visitor visitor) throws SofabException {
+    public DecodeStatus feed(byte[] data, int off, int len, Visitor visitor) throws SofabException {
         if (terminal == SofabError.LIMIT_EXCEEDED) {
             // Repeated in the carrier it was raised through, so the caller's
             // existing catch still sees it, and still under its own code: §6.3
@@ -435,6 +404,15 @@ public final class IStream {
             }
             throw e;
         }
+        // The decode survived, so the outcome is one of the two §5.2.1 values that
+        // more bytes could still change, computed from the decoder's own state at
+        // this byte boundary (§5.2.4 — no finish step, and nothing to latch).
+        // COMPLETE only at a true field boundary: no partial field header varint
+        // (that is its own state, S_HEADER), no in-progress value/payload/array
+        // element (S_IDLE covers the resumable machine and mid-array between
+        // elements), and every opened sequence closed (depth == 0). Anything else
+        // means the bytes ended inside a field or an open sequence — INCOMPLETE.
+        return state == S_IDLE && depth == 0 ? DecodeStatus.COMPLETE : DecodeStatus.INCOMPLETE;
     }
 
     /**
@@ -1414,7 +1392,7 @@ public final class IStream {
      */
     private void stepIdle(int b, Visitor visitor) throws SofabException {
         if (!varintPush(b)) {
-            state = S_HEADER; // header still incomplete: status() reports INCOMPLETE
+            state = S_HEADER; // header still incomplete: feed returns INCOMPLETE
             return;
         }
         long header = varintOut;
