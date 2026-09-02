@@ -218,15 +218,20 @@ public final class IStream {
     private long depth;
 
     /**
-     * Latched {@link DecodeStatus#INVALID}: the bytes fed so far were determined
-     * malformed, which CORELIB_PLAN §5.2 makes <b>terminal</b> — no continuation
-     * can make them valid. Set from {@link #feed}'s handler on the way out, so
-     * every rejection latches, wherever in this class it is raised (and a
-     * schema-bound rejection raised by the {@link Visitor} does too). Once set,
-     * {@link #status()} answers {@code INVALID} and {@code feed} refuses further
-     * bytes until {@link #reset()} starts a new message.
+     * The latched terminal verdict, or {@code null} while the decode is still
+     * live: the {@link SofabError} of the rejection that ended it. Two codes end a
+     * decode and both latch here — {@link SofabError#INVALID_MSG}, the bytes are
+     * malformed and CORELIB_PLAN §5.2 makes that <b>terminal</b>, and
+     * {@link SofabError#LIMIT_EXCEEDED}, "a <b>terminal</b>, receiver-local policy
+     * rejection" of well-formed bytes (§6.3) — and the code is kept rather than a
+     * flag because §6.3 forbids ever reporting the second as {@code InvalidMessage}.
+     * Set from {@link #feed}'s handler on the way out, so every rejection latches,
+     * wherever it is raised (in this class, or by the {@link Visitor} generated
+     * code drives). Once set, {@link #status()} answers the matching terminal
+     * outcome and {@code feed} refuses further bytes until {@link #reset()} starts
+     * a new message.
      */
-    private boolean invalid;
+    private SofabError terminal;
 
     /**
      * Bytes of the current message handed to the resumable byte-at-a-time machine
@@ -292,7 +297,7 @@ public final class IStream {
         bulkW = W_NONE;
         bulkAt = 0;
         depth = 0;
-        invalid = false;
+        terminal = null;
         machineBytes = 0;
         // Pure scratch — every path writes it before it reads it — but cleared
         // anyway so "reset restores every declared field" needs no exception for
@@ -317,19 +322,32 @@ public final class IStream {
      * boundary — can turn it back into {@code COMPLETE} or {@code INCOMPLETE}.
      * {@link #reset()} clears it, because that starts a new message.
      *
+     * <p>A message a receiver <em>limit</em> refused (§6.2.1) answers
+     * {@link DecodeStatus#LIMIT_EXCEEDED}, latched and terminal in exactly the same
+     * way — §6.3 calls it "a terminal, receiver-local policy rejection" — but a
+     * separate outcome, because the bytes are well-formed and §6.3 <b>MUST NOT</b>
+     * have them reported as {@code InvalidMessage}.
+     *
      * <p>Per the finish-less spec (MESSAGE_SPEC §7) this is a pure accessor: it
      * never throws, never mutates decoder state, and never promotes an incomplete
      * decode to an error. The caller owns end-of-input and decides whether a
      * trailing {@code INCOMPLETE} is a truncation it cares about.
      *
      * @return {@link DecodeStatus#INVALID} once any fed bytes were rejected as
-     *         malformed, else {@link DecodeStatus#COMPLETE} at a clean boundary,
+     *         malformed, {@link DecodeStatus#LIMIT_EXCEEDED} once a receiver limit
+     *         refused them, else {@link DecodeStatus#COMPLETE} at a clean boundary,
      *         otherwise {@link DecodeStatus#INCOMPLETE}
      */
     public DecodeStatus status() {
-        // INVALID first: it is a property of bytes already consumed and no later
-        // state can revise it (§5.2, "INVALID wins over INCOMPLETE" and terminal).
-        if (invalid) {
+        // A latched rejection first: it is a property of bytes already consumed
+        // and no later state can revise it (§5.2, "INVALID wins over INCOMPLETE"
+        // and terminal; §6.3 for the policy rejection, terminal just the same).
+        // The two stay distinct outcomes — §6.3 MUST NOT fold a limit rejection
+        // into INVALID.
+        if (terminal == SofabError.LIMIT_EXCEEDED) {
+            return DecodeStatus.LIMIT_EXCEEDED;
+        }
+        if (terminal != null) {
             return DecodeStatus.INVALID;
         }
         // COMPLETE only at a true field boundary: no partial field header varint
@@ -365,6 +383,9 @@ public final class IStream {
      * method decodes nothing further and rethrows {@code INVALID_MSG} for every
      * subsequent call, and {@link #status()} keeps reporting
      * {@link DecodeStatus#INVALID}, until {@link #reset()} begins a new message.
+     * {@link SofabError#LIMIT_EXCEEDED} is terminal too (§6.3) and behaves the same
+     * way, rethrown in the carrier it arrived in and reported by {@code status()}
+     * as {@link DecodeStatus#LIMIT_EXCEEDED} — never as {@code INVALID}.
      * Running out of bytes mid-field is <em>not</em> that: it suspends and resumes
      * on the next call, as before.
      *
@@ -374,9 +395,19 @@ public final class IStream {
      * @param visitor sink for decoded fields
      * @throws SofabException with {@link SofabError#INVALID_MSG} on malformed input,
      *         or on any call after malformed input was already rejected
+     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
+     *         {@link SofabException} on any call after a receiver limit refused
+     *         this message
      */
     public void feed(byte[] data, int off, int len, Visitor visitor) throws SofabException {
-        if (invalid) {
+        if (terminal == SofabError.LIMIT_EXCEEDED) {
+            // Repeated in the carrier it was raised through, so the caller's
+            // existing catch still sees it, and still under its own code: §6.3
+            // MUST NOT report a receiver-limit rejection as InvalidMessage.
+            throw Sofab.limitExceeded(
+                    "decode already refused by a receiver limit; reset() to start a new message");
+        }
+        if (terminal != null) {
             throw new SofabException(SofabError.INVALID_MSG,
                     "decode already INVALID; reset() to start a new message");
         }
@@ -387,23 +418,35 @@ public final class IStream {
             // sites: a rejection raised anywhere in this class — fast path,
             // resumable state machine, or a helper added later — is terminal, and
             // this is the one place all of them pass through.
-            if (e.error() == SofabError.INVALID_MSG) {
-                invalid = true;
+            if (isTerminal(e.error())) {
+                terminal = e.error();
             }
             throw e;
         } catch (UncheckedIOException e) {
             // A Visitor cannot declare a checked exception, so generated code
             // reports a schema bound it must reject (MESSAGE_SPEC §7.1: an
             // over-maxlen length, an over-capacity count, an invalid-UTF-8 string)
-            // by wrapping a SofabException. That is the same INVALID outcome and is
-            // latched the same way — while LIMIT_EXCEEDED, a receiver-side policy
-            // rejection of well-formed bytes (§6.2.1), deliberately is not.
-            if (e.getCause() instanceof SofabException cause
-                    && cause.error() == SofabError.INVALID_MSG) {
-                invalid = true;
+            // by wrapping a SofabException, and refuses a receiver cap (§6.2.1) the
+            // same way. Both end the decode, so both latch here, each keeping its
+            // own code: §6.3 makes the policy rejection terminal too and forbids
+            // reporting it as InvalidMessage.
+            if (e.getCause() instanceof SofabException cause && isTerminal(cause.error())) {
+                terminal = cause.error();
             }
             throw e;
         }
+    }
+
+    /**
+     * The rejections that end a decode, wherever they were raised: the bytes are
+     * malformed ({@link SofabError#INVALID_MSG}, terminal per CORELIB_PLAN §5.2) or
+     * a receiver limit refused them ({@link SofabError#LIMIT_EXCEEDED}, "a terminal
+     * … policy rejection" per §6.3). The remaining codes belong to the encoder and
+     * to argument checks and say nothing about the decode, so they pass through
+     * without latching — as a visitor's own I/O failure does.
+     */
+    private static boolean isTerminal(SofabError error) {
+        return error == SofabError.INVALID_MSG || error == SofabError.LIMIT_EXCEEDED;
     }
 
     /**

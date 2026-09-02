@@ -197,7 +197,7 @@ class InvalidIsTerminalTest {
         assertEquals(DecodeStatus.COMPLETE, is.status());
     }
 
-    // --- what does NOT latch ------------------------------------------------
+    // --- what does NOT latch INVALID -----------------------------------------
 
     /** A merely truncated message stays INCOMPLETE and keeps decoding (§5.2). */
     @Test
@@ -215,9 +215,10 @@ class InvalidIsTerminalTest {
 
     /**
      * A receiver-side limit (§6.2.1) is a policy rejection of well-formed bytes: it
-     * is explicitly NOT the INVALID outcome, so it must not latch one. Generated
-     * code raises it from a visitor callback, wrapped because {@link Visitor}
-     * declares no checked exception.
+     * is explicitly NOT the INVALID outcome, so it must not latch one. It is
+     * terminal all the same and latches under its own code — that half belongs to
+     * {@link LimitExceededIsTerminalTest}. Generated code raises it from a visitor
+     * callback, wrapped because {@link Visitor} declares no checked exception.
      */
     @Test
     void aLimitExceededFromTheVisitorDoesNotLatchInvalid() {

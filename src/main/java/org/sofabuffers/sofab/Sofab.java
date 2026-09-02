@@ -101,8 +101,8 @@ public final class Sofab {
      * }</pre>
      *
      * <p>{@link SofabError#LIMIT_EXCEEDED} — a receiver-side policy rejection of
-     * well-formed bytes (§6.2.1) — is deliberately not this, and is not latched:
-     * it travels through {@link #limitExceeded(String)} instead.
+     * well-formed bytes (§6.2.1) — is deliberately not this: it travels through
+     * {@link #limitExceeded(String)} instead, and is latched under its own code.
      *
      * @param detail human-readable context, naming the field and the bound it broke
      * @return the exception to throw
@@ -118,13 +118,15 @@ public final class Sofab {
      * exception.
      *
      * <p>It is the twin of {@link #invalid} and deliberately not the same thing.
-     * {@code INVALID_MSG} says <em>these bytes are broken</em> and is latched by
-     * {@link IStream#feed}, so the decode is terminal and every later call repeats
-     * the rejection. {@code LIMIT_EXCEEDED} says <em>these bytes are fine and this
-     * receiver declines to hold that much</em>: the same message decodes under a
-     * looser limit, so it is not latched, is never folded into
-     * {@link DecodeStatus#INVALID}, and is never clamped or truncated into a
-     * shortened value.
+     * {@code INVALID_MSG} says <em>these bytes are broken</em>; {@code LIMIT_EXCEEDED}
+     * says <em>these bytes are fine and this receiver declines to hold that
+     * much</em>, so the same message decodes under a looser limit. Both are
+     * <b>terminal</b> (§6.3: "a terminal, receiver-local policy rejection") and
+     * {@link IStream#feed} latches both, so the decode ends there and every later
+     * call repeats the rejection until {@link IStream#reset()}; what keeps them
+     * apart is the code they keep — a limit rejection is never folded into
+     * {@link DecodeStatus#INVALID} (it answers {@link DecodeStatus#LIMIT_EXCEEDED})
+     * and is never clamped or truncated into a shortened value.
      *
      * <p>Raised from two places, and only where a cap was actually supplied:
      * {@link PayloadAcc#string} / {@link PayloadAcc#blob} at a payload's announced

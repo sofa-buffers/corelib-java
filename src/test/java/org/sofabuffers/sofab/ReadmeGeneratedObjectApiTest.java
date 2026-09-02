@@ -118,7 +118,7 @@ class ReadmeGeneratedObjectApiTest {
 
             public DecodeStatus feed(byte[] chunk, int off, int len) throws SofabException {
                 is.feed(chunk, off, len, p);
-                return is.status();          // COMPLETE / INCOMPLETE; INVALID throws
+                return is.status();          // COMPLETE / INCOMPLETE; INVALID and LIMIT_EXCEEDED throw
             }
 
             public Point message() { return p; }

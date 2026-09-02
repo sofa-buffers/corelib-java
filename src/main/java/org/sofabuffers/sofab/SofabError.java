@@ -60,7 +60,10 @@ public enum SofabError {
      *
      * <p><b>Always a hard error.</b> A limit violation is never clamped and never
      * truncated; it is raised before the allocation it prevents, and
-     * {@link IStream#feed} does not latch it as {@link #INVALID_MSG} would be.
+     * {@link IStream#feed} latches it as it latches {@link #INVALID_MSG} — §6.3
+     * makes it terminal too — but under this code, reported by
+     * {@link IStream#status()} as {@link DecodeStatus#LIMIT_EXCEEDED} and never as
+     * {@link DecodeStatus#INVALID}.
      *
      * <p><b>This corelib defines no limit and no default for one.</b> It holds no
      * {@code max_dyn_*} value, supplies none to a caller who states none, and
