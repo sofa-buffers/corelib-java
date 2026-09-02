@@ -245,23 +245,26 @@ class DecodeRuleWrittenOnceTest {
     private static String outcome(byte[] data, int split, List<String> events) {
         RecordingVisitor v = new RecordingVisitor();
         IStream in = new IStream();
+        // The outcome is the last feed's return (§5.2.4); an empty input is fed
+        // once whole either way, so this is only the never-fed starting point.
+        DecodeStatus st = DecodeStatus.COMPLETE;
         try {
             if (split < 0) {
                 for (byte b : data) {
-                    in.feed(new byte[] { b }, v);
+                    st = in.feed(new byte[] { b }, v);
                 }
             } else if (split == 0) {
-                in.feed(data, v);
+                st = in.feed(data, v);
             } else {
                 in.feed(data, 0, split, v);
-                in.feed(data, split, data.length - split, v);
+                st = in.feed(data, split, data.length - split, v);
             }
         } catch (SofabException e) {
             events.addAll(v.events);
             return e.error() == SofabError.INVALID_MSG ? "INVALID" : e.error().name();
         }
         events.addAll(v.events);
-        return in.status().name();
+        return st.name();
     }
 
     /** Every split of {@code data}: whole, one byte at a time, and each cut point. */

@@ -178,8 +178,7 @@ class NonMinimalVarintTest {
     void feedingTheMissingByteThenRejects() throws IOException {
         IStream in = new IStream();
         Visitor drop = new Visitor() { };
-        in.feed(bytes(0x02, 0x84), drop);
-        assertEquals(DecodeStatus.INCOMPLETE, in.status());
+        assertEquals(DecodeStatus.INCOMPLETE, in.feed(bytes(0x02, 0x84), drop));
 
         SofabException e = org.junit.jupiter.api.Assertions.assertThrows(SofabException.class,
                 () -> in.feed(bytes(0x01), drop));
@@ -209,14 +208,15 @@ class NonMinimalVarintTest {
     private static List<String> events(byte[] data, int chunk) throws IOException {
         RecordingVisitor v = new RecordingVisitor();
         IStream in = new IStream();
+        DecodeStatus after = null;
         if (chunk <= 0) {
-            in.feed(data, v);
+            after = in.feed(data, v);
         } else {
             for (int i = 0; i < data.length; i += chunk) {
-                in.feed(data, i, Math.min(chunk, data.length - i), v);
+                after = in.feed(data, i, Math.min(chunk, data.length - i), v);
             }
         }
-        assertEquals(DecodeStatus.COMPLETE, in.status());
+        assertEquals(DecodeStatus.COMPLETE, after);
         return v.events;
     }
 

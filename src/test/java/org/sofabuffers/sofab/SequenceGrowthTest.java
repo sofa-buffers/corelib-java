@@ -9,6 +9,7 @@ package org.sofabuffers.sofab;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -327,10 +328,15 @@ class SequenceGrowthTest {
                                 + " — extended toward the rejected index");
             }
             if (expect.has("terminal") && expect.get("terminal").getAsBoolean()) {
-                // Terminal: the rejection is not folded into the wire-conformance
-                // outcome (§6.3), so the status is never INVALID and never COMPLETE.
-                assertTrue(in.status() != DecodeStatus.INVALID, "status is not INVALID");
-                assertTrue(in.status() != DecodeStatus.COMPLETE, "status is not COMPLETE");
+                // Terminal: asking the decoder again — an empty feed adds no bytes —
+                // gets the refusal back rather than an outcome, so it never answers
+                // COMPLETE, and never under the wire-conformance code either: §6.3
+                // forbids folding a policy rejection into InvalidMessage.
+                UncheckedIOException again = assertThrows(UncheckedIOException.class,
+                        () -> in.feed(new byte[0], dest), "the refusal is terminal");
+                assertEquals(SofabError.LIMIT_EXCEEDED,
+                        ((SofabException) again.getCause()).error(),
+                        "the repeat is not INVALID_MSG");
             }
         }
     }

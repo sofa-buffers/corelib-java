@@ -228,14 +228,15 @@ class PayloadAccTest {
         for (int chunk : List.of(0, 1, 3, 7)) {
             Collector v = new Collector();
             IStream in = new IStream();
+            DecodeStatus after = null;
             if (chunk == 0) {
-                in.feed(message, v);
+                after = in.feed(message, v);
             } else {
                 for (int i = 0; i < message.length; i += chunk) {
-                    in.feed(message, i, Math.min(chunk, message.length - i), v);
+                    after = in.feed(message, i, Math.min(chunk, message.length - i), v);
                 }
             }
-            assertEquals(DecodeStatus.COMPLETE, in.status(), "chunk " + chunk);
+            assertEquals(DecodeStatus.COMPLETE, after, "chunk " + chunk);
             assertEquals(List.of(MIXED), v.strings, "chunk " + chunk);
             assertEquals(1, v.blobs.size(), "chunk " + chunk);
             assertArrayEquals(blob, v.blobs.get(0), "chunk " + chunk);

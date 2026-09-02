@@ -225,12 +225,13 @@ class DecoderErrorsTest {
 
         RecordingVisitor v = new RecordingVisitor();
         IStream in = new IStream();
+        DecodeStatus after = null;
         for (byte b : data) {
-            in.feed(new byte[] { b }, v);
+            after = in.feed(new byte[] { b }, v);
         }
         assertEquals(expected, v.events);
         // Every sequence closed, no partial header: a clean field boundary.
-        assertEquals(DecodeStatus.COMPLETE, in.status());
+        assertEquals(DecodeStatus.COMPLETE, after);
     }
 
     @Test

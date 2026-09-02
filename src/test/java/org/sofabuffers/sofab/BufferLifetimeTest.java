@@ -132,13 +132,14 @@ class BufferLifetimeTest {
             RecordingVisitor got = new RecordingVisitor();
             IStream in = new IStream();
             byte[] window = new byte[chunk];
+            DecodeStatus after = null;
             for (int i = 0; i < message.length; i += chunk) {
                 int len = Math.min(chunk, message.length - i);
                 System.arraycopy(message, i, window, 0, len);
-                in.feed(window, 0, len, got);
+                after = in.feed(window, 0, len, got);
                 Arrays.fill(window, SCRUB);           // the caller reuses its memory
             }
-            assertEquals(DecodeStatus.COMPLETE, in.status(), "chunk size " + chunk);
+            assertEquals(DecodeStatus.COMPLETE, after, "chunk size " + chunk);
             assertEquals(expected.events, got.events,
                     "a chunk scrubbed after feed returned changed the decoded message at chunk "
                             + "size " + chunk + ": the decoder kept a slice into it (§6.0)");
@@ -158,10 +159,10 @@ class BufferLifetimeTest {
         byte[] buffer = message.clone();
         RecordingVisitor got = new RecordingVisitor();
         IStream in = new IStream();
-        in.feed(buffer, got);
+        DecodeStatus after = in.feed(buffer, got);
         Arrays.fill(buffer, SCRUB);
 
-        assertEquals(DecodeStatus.COMPLETE, in.status());
+        assertEquals(DecodeStatus.COMPLETE, after);
         assertEquals(expected.events, got.events,
                 "scrubbing the one-shot buffer changed the decoded message: the decoder borrowed "
                         + "from the buffer it was handed (§6.7.1)");

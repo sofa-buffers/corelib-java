@@ -67,7 +67,11 @@ class SofabTest {
                 assertThrows(UncheckedIOException.class, () -> in.feed(message, v));
         SofabException cause = assertInstanceOf(SofabException.class, e.getCause());
         assertEquals(SofabError.INVALID_MSG, cause.error());
-        assertEquals(DecodeStatus.INVALID, in.status());
+        // Latched: the decoder decodes nothing further and repeats the verdict,
+        // which is the only place there is to read it.
+        SofabException again = assertThrows(SofabException.class,
+                () -> in.feed(bytes(0x00, 0x2A), v));
+        assertEquals(SofabError.INVALID_MSG, again.error());
 
         SofabException next = assertThrows(SofabException.class, () -> in.feed(message, v),
                 "a rejection is terminal: the next feed rejects without decoding");

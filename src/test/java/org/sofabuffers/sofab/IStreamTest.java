@@ -105,11 +105,9 @@ class IStreamTest {
 
     // --- three-valued outcome (MESSAGE_SPEC §7): COMPLETE / INCOMPLETE / INVALID -
 
-    /** Feed a whole buffer, then report the terminal decode status. */
+    /** Feed a whole buffer and report the outcome feed itself returned. */
     private static DecodeStatus statusOf(byte[] data) throws SofabException {
-        IStream is = new IStream();
-        is.feed(data, new Visitor() { });
-        return is.status();
+        return new IStream().feed(data, new Visitor() { });
     }
 
     @Test
@@ -129,8 +127,8 @@ class IStreamTest {
         // could complete it) and NOT a clean boundary — it must read as INCOMPLETE,
         // distinct from a normal COMPLETE return.
         IStream is = new IStream();
-        is.feed(bytes(0x80), new Visitor() { }); // returns normally, no throw
-        assertEquals(DecodeStatus.INCOMPLETE, is.status());
+        // Returns normally, no throw — and the return carries the verdict.
+        assertEquals(DecodeStatus.INCOMPLETE, is.feed(bytes(0x80), new Visitor() { }));
     }
 
     @Test
@@ -172,19 +170,20 @@ class IStreamTest {
         assertEquals(DecodeStatus.INCOMPLETE, statusOf(bytes(0x02, 0x2A, 0x48, 0x65, 0x6C)));
     }
 
-    // The fourth outcome, INVALID, is not a status: it throws. Every vector that
+    // The third outcome, INVALID, is never returned: it throws. Every vector that
     // raises it lives in DecoderErrorsTest's table, asserted on both surfaces.
 
     @Test
-    void statusIsAPureAccessor() throws SofabException {
-        // status() must not mutate decoder state: calling it repeatedly, and before
-        // more bytes arrive, is stable and lets a resumed feed still complete.
+    void everyFeedAnswersForTheBytesSoFar() throws SofabException {
+        // Each feed reports on everything consumed so far, not on its own slice,
+        // and reporting costs nothing: an INCOMPLETE feed leaves the suspended
+        // field intact, so the next feed resumes it and completes the message.
         IStream is = new IStream();
-        is.feed(bytes(0x00), new Visitor() { }); // field header only, value pending
-        assertEquals(DecodeStatus.INCOMPLETE, is.status());
-        assertEquals(DecodeStatus.INCOMPLETE, is.status());
-        is.feed(bytes(0x2A), new Visitor() { }); // value arrives; message completes
-        assertEquals(DecodeStatus.COMPLETE, is.status());
+        Visitor v = new Visitor() { };
+        assertEquals(DecodeStatus.INCOMPLETE, is.feed(bytes(0x00), v)); // header only
+        // A zero-byte feed changes nothing and repeats the same answer.
+        assertEquals(DecodeStatus.INCOMPLETE, is.feed(new byte[0], v));
+        assertEquals(DecodeStatus.COMPLETE, is.feed(bytes(0x2A), v));   // value arrives
     }
 
     /**
@@ -212,12 +211,12 @@ class IStreamTest {
     @Test
     void resetDiscardsPartialMessage() throws SofabException {
         IStream is = new IStream();
-        is.feed(bytes(0x00), new RecordingVisitor());   // id/type header, value byte withheld
-        assertEquals(DecodeStatus.INCOMPLETE, is.status());
+        // id/type header, value byte withheld
+        assertEquals(DecodeStatus.INCOMPLETE, is.feed(bytes(0x00), new RecordingVisitor()));
         is.reset();
         RecordingVisitor v = new RecordingVisitor();
-        is.feed(bytes(0x08, 0x63), v);                  // a complete, unrelated message
-        assertEquals(DecodeStatus.COMPLETE, is.status());
+        // a complete, unrelated message
+        assertEquals(DecodeStatus.COMPLETE, is.feed(bytes(0x08, 0x63), v));
         assertEquals(decode(bytes(0x08, 0x63)), v.events);
     }
 

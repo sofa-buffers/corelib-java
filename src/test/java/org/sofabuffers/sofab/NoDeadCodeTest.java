@@ -141,16 +141,16 @@ class NoDeadCodeTest {
 
         RecordingVisitor oneShot = new RecordingVisitor();
         IStream in = new IStream();
-        in.feed(msg, oneShot);
-        assertEquals(DecodeStatus.COMPLETE, in.status());
+        assertEquals(DecodeStatus.COMPLETE, in.feed(msg, oneShot));
 
         // Byte-at-a-time drives the resumable header dispatch over the same eight.
         RecordingVisitor chunked = new RecordingVisitor();
         IStream slow = new IStream();
+        DecodeStatus after = null;
         for (byte b : msg) {
-            slow.feed(new byte[] { b }, chunked);
+            after = slow.feed(new byte[] { b }, chunked);
         }
-        assertEquals(DecodeStatus.COMPLETE, slow.status());
+        assertEquals(DecodeStatus.COMPLETE, after);
 
         List<String> expected = List.of(
                 "u:1=42", "s:1=42", "str:1=A",
@@ -213,8 +213,7 @@ class NoDeadCodeTest {
 
         RecordingVisitor v = new RecordingVisitor();
         IStream in = new IStream();
-        in.feed(buf, 0, os.bytesUsed(), v);
-        assertEquals(DecodeStatus.COMPLETE, in.status());
+        assertEquals(DecodeStatus.COMPLETE, in.feed(buf, 0, os.bytesUsed(), v));
         assertEquals(10, v.events.stream().filter(e -> e.startsWith("arr:")).count());
     }
 }

@@ -112,13 +112,15 @@ class ResetCoversEveryFieldTest {
         IStream used = new IStream();
         used.feed(bytes(0x36), drop);           // sequence start, id 6: depth 1
         used.feed(bytes(0x22, 0x41), drop);     // fp64 field id 4, its fixlen_word
-        used.feed(bytes(0x01, 0x02, 0x03), drop); // 3 of 8 payload bytes: acc in use
-        assertEquals(DecodeStatus.INCOMPLETE, used.status());
+        // 3 of 8 payload bytes: acc in use
+        assertEquals(DecodeStatus.INCOMPLETE, used.feed(bytes(0x01, 0x02, 0x03), drop));
         assertDiffersFromFresh(used, new IStream(), ISTREAM_RETAINED);
 
         used.reset();
 
-        assertEquals(DecodeStatus.COMPLETE, used.status());
+        // An empty feed adds no bytes and mutates nothing, so it asks the reset
+        // decoder where it stands: back at a clean field boundary.
+        assertEquals(DecodeStatus.COMPLETE, used.feed(new byte[0], drop));
         assertIndistinguishableFromFresh(used, new IStream(), ISTREAM_RETAINED);
     }
 

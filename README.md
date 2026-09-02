@@ -29,14 +29,14 @@ over the field id. The wire format is specified language-neutrally in the
 
 ### Package name
 
-Maven coordinates `org.sofabuffers:corelib` (version `0.12.0`); the import namespace
+Maven coordinates `org.sofabuffers:corelib` (version `0.13.0`); the import namespace
 is the package `org.sofabuffers.sofab`.
 
 ```xml
 <dependency>
   <groupId>org.sofabuffers</groupId>
   <artifactId>corelib</artifactId>
-  <version>0.12.0</version>
+  <version>0.13.0</version>
 </dependency>
 ```
 
@@ -57,7 +57,7 @@ is the package `org.sofabuffers.sofab`.
 | No per-field allocation | State lives in caller-provided buffers plus small `OStream` / `IStream` objects. Scalars stay primitive (`long` / `double`) — no autoboxing on the hot path. |
 | No reflection, no runtime codegen | Pure method calls; the decoder pushes to a `Visitor` interface. Suitable for GraalVM native-image and locked-down runtimes. |
 | Streaming **out** | `OStream` writes into a small caller buffer and invokes a `FlushSink` whenever it fills, so a message can exceed the buffer — and even RAM. |
-| Streaming **in** | `IStream` accepts arbitrarily small chunks; a message may split across `feed` calls at any byte boundary, and large string / blob payloads arrive in pieces. Malformed bytes throw `SofabException` (`INVALID_MSG`); running out of bytes mid-field is **not** an error — `feed` suspends and resumes on the next chunk. Call `status()` after the final `feed` to tell a `COMPLETE` message from a truncated `INCOMPLETE` one; it never throws and needs no finish/finalize step. A rejection is **terminal**: `status()` reports `INVALID` from then on and every further `feed` rethrows `INVALID_MSG` without decoding; `reset()` starts the next one. |
+| Streaming **in** | `IStream` accepts arbitrarily small chunks; a message may split across `feed` calls at any byte boundary, and large string / blob payloads arrive in pieces. `feed` **returns** the outcome for the bytes seen so far — `COMPLETE` at a field boundary, `INCOMPLETE` mid-field — so there is one place to read it and no finish/finalize step. `INCOMPLETE` is not an error: the decode suspends and resumes on the next chunk. A refusal travels on the error channel instead: malformed bytes throw `SofabException` (`INVALID_MSG`), well-formed bytes a receiver cap declines throw `LIMIT_EXCEEDED` (§6.3). Both are **terminal** — every further `feed` rethrows that same code without decoding; `reset()` starts the next one. |
 | Sparse sequence framing, still one pass | `writeSequenceBeginLazy` holds a sequence header back until a child field is actually written, so a sequence-typed **field** that receives no content is omitted rather than framed empty — decided in a single forward pass, with no sub-message buffering. Held-back ids are encoder state, not buffer content, so a tiny output buffer still produces the one-shot bytes. `writeSequenceEnd` drops such a sequence; `writeSequenceEndKeep` forces the frame out, and a wrapper-array **element** is always framed. The pending run grows on demand to the full `MAX_DEPTH` (255), so the output is canonical at every legal nesting depth. |
 | Reserve-offset | `new OStream(buf, offset)` leaves room at the front for a lower-layer protocol header, saving a copy. |
 | Explicit endianness | IEEE-754 values are written / read little-endian with explicit bit shifts, so behaviour is identical on every JVM. |
@@ -226,8 +226,7 @@ final class Point implements Visitor {
         private final IStream is = new IStream();
 
         public DecodeStatus feed(byte[] chunk, int off, int len) throws SofabException {
-            is.feed(chunk, off, len, p);
-            return is.status();          // COMPLETE / INCOMPLETE; INVALID throws
+            return is.feed(chunk, off, len, p);  // COMPLETE / INCOMPLETE; a refusal throws
         }
 
         public Point message() { return p; }
@@ -249,7 +248,9 @@ Point streamed = dec.message();                 // streamed.x == 3, streamed.y =
 ```
 
 `feed` returns the outcome for the bytes seen so far — `COMPLETE` on a field
-boundary, `INCOMPLETE` mid-field, and malformed bytes throw (`INVALID`, terminal).
+boundary, `INCOMPLETE` mid-field — and that return is the only place to read it.
+Malformed bytes throw instead (`INVALID_MSG`, terminal), and so do well-formed bytes
+a receiver cap refuses (`LIMIT_EXCEEDED`, terminal in the same way).
 The top level has no end marker, so *the caller's* framing decides when the input is
 over; a still-`INCOMPLETE` status at that point is a truncated message. Give the
 encoder's `OStream` a `FlushSink` and the same `serialize` streams a message larger
@@ -270,7 +271,7 @@ is an argument, an element type is a type parameter.
 | `PayloadAcc` | reassemble a `string` / `blob` payload split across feeds — a payload that arrives whole never touches its buffer, and the value never depends on where the split fell; the receiver cap on the announced length arrives as a `Bound` and is compared before the first chunk is taken (§6.2.1) |
 | `Utf8.decode` | validate a byte range and materialize it, in that order — the only order in which invalid UTF-8 can still be rejected (§6.4) |
 | `Sofab.invalid` | the carrier a `Visitor` rejects malformed input through, since a callback declares no checked exception; `IStream.feed` latches it as terminal like its own rejections |
-| `Sofab.limitExceeded` / `Sofab.argument` | the twin carrier for a receiver-limit refusal, which is **not** latched as `INVALID`; and the carrier for a defect in the call, such as a bound the caller never stated |
+| `Sofab.limitExceeded` / `Sofab.argument` | the twin carrier for a receiver-limit refusal, which is latched as terminal too but under its own code, **never** as `INVALID`; and the carrier for a defect in the call, such as a bound the caller never stated |
 | `Bound.receiver` / `Bound.SCHEMA_BOUNDED` | which of §6.2.1's two rules bounds one field: the deployment's configured cap, or the schema's own `count`/`maxlen` |
 | `OStream.overScratch` / `copyOfBytesUsed` | a per-thread buffer for a one-shot `encode()`, so the worst case is allocated once per thread rather than once per call. The **size** stays with the caller (CORELIB_PLAN §5.1): generated code passes its own `MAX_SIZE` |
 
@@ -295,8 +296,10 @@ the limit guards:
 | `max_dyn_array_count` | `Seq.reserveRow` / `reserveRow*(…, bound)` | the row **index**, before the row and the list grow |
 
 A breach is `SofabError.LIMIT_EXCEEDED` — a policy rejection of well-formed bytes,
-never clamped into a shortened value and never the `INVALID` outcome. A caller that
-passes a cap here does not also guard in front of the call: the rule has one
+never clamped into a shortened value and never the `INVALID` outcome. It is
+**terminal** (§6.3): the decode ends there, and every further `feed` repeats the
+rejection — the thrown exception, under that code — until `reset()`. A caller
+that passes a cap here does not also guard in front of the call: the rule has one
 implementation.
 
 `Bound` is what each of those calls takes, and it has exactly the two answers

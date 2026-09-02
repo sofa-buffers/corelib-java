@@ -191,9 +191,9 @@ class ArrayBulkTest {
             Bulk bulk = new Bulk();
             IStream is = new IStream();
             is.feed(msg, 0, cut, bulk);
-            is.feed(msg, cut, msg.length - cut, bulk);
+            DecodeStatus after = is.feed(msg, cut, msg.length - cut, bulk);
 
-            assertEquals(DecodeStatus.COMPLETE, is.status(), "cut at " + cut);
+            assertEquals(DecodeStatus.COMPLETE, after, "cut at " + cut);
             assertArrayEquals(src, bulk.dst, "cut at " + cut);
             assertEquals(1, bulk.ends, "arrayBulkEnd fires exactly once, cut at " + cut);
             assertEquals(src.length, bulk.endN, "cut at " + cut);
@@ -209,10 +209,11 @@ class ArrayBulkTest {
 
         Bulk bulk = new Bulk();
         IStream is = new IStream();
+        DecodeStatus after = null;
         for (byte b : msg) {
-            is.feed(new byte[] {b}, bulk);
+            after = is.feed(new byte[] {b}, bulk);
         }
-        assertEquals(DecodeStatus.COMPLETE, is.status());
+        assertEquals(DecodeStatus.COMPLETE, after);
         assertArrayEquals(src, bulk.dst);
         assertEquals(1, bulk.ends);
         assertEquals(src.length, bulk.endN);
@@ -315,7 +316,11 @@ class ArrayBulkTest {
             SofabException e = org.junit.jupiter.api.Assertions.assertThrows(SofabException.class,
                     () -> is.feed(msg, v), c + " must not decode");
             assertEquals(SofabError.INVALID_MSG, e.error(), c.toString());
-            assertEquals(DecodeStatus.INVALID, is.status(), c + " is terminal");
+            // Terminal: the verdict is not read back from an accessor, it is what
+            // every further feed keeps throwing, decoding nothing.
+            SofabException again = org.junit.jupiter.api.Assertions.assertThrows(
+                    SofabException.class, () -> is.feed(msg, v), c + " is terminal");
+            assertEquals(SofabError.INVALID_MSG, again.error(), c + " is terminal");
         }
     }
 
@@ -346,8 +351,8 @@ class ArrayBulkTest {
             Narrow v = new Narrow(1);
             IStream is = new IStream();
             is.feed(msg, 0, cut, v);
-            is.feed(msg, cut, msg.length - cut, v);
-            assertEquals(DecodeStatus.COMPLETE, is.status(), "cut at " + cut);
+            assertEquals(DecodeStatus.COMPLETE, is.feed(msg, cut, msg.length - cut, v),
+                    "cut at " + cut);
             assertArrayEquals(want, (byte[]) v.dst, "cut at " + cut);
             assertEquals(1, v.ends, "cut at " + cut);
         }
@@ -482,15 +487,12 @@ class ArrayBulkTest {
 
         Bulk bulk = new Bulk();
         IStream is = new IStream();
-        is.feed(msg, 0, msg.length / 2, bulk);
-        assertEquals(DecodeStatus.INCOMPLETE, is.status());
+        assertEquals(DecodeStatus.INCOMPLETE, is.feed(msg, 0, msg.length / 2, bulk));
         long[] abandoned = bulk.dst;
 
         is.reset();
         byte[] scalar = encode(os -> os.writeUnsigned(1, 7));
-        is.feed(scalar, bulk);
-
-        assertEquals(DecodeStatus.COMPLETE, is.status());
+        assertEquals(DecodeStatus.COMPLETE, is.feed(scalar, bulk));
         assertEquals(List.of(7L), bulk.scalars, "the new message's value is not an element");
         assertEquals(0, abandoned[abandoned.length - 1],
                 "nothing may be written into the abandoned destination after reset");

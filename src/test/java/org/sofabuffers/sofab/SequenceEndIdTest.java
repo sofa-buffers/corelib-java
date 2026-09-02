@@ -56,8 +56,7 @@ class SequenceEndIdTest {
     private static List<String> decode(byte[] data) throws SofabException {
         RecordingVisitor v = new RecordingVisitor();
         IStream is = new IStream();
-        is.feed(data, v);
-        assertEquals(DecodeStatus.COMPLETE, is.status());
+        assertEquals(DecodeStatus.COMPLETE, is.feed(data, v));
         return v.events;
     }
 
@@ -65,10 +64,11 @@ class SequenceEndIdTest {
     private static List<String> decodeByteByByte(byte[] data) throws SofabException {
         RecordingVisitor v = new RecordingVisitor();
         IStream is = new IStream();
+        DecodeStatus after = null;
         for (byte b : data) {
-            is.feed(new byte[] {b}, v);
+            after = is.feed(new byte[] {b}, v);
         }
-        assertEquals(DecodeStatus.COMPLETE, is.status());
+        assertEquals(DecodeStatus.COMPLETE, after);
         return v.events;
     }
 
