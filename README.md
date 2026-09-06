@@ -442,6 +442,21 @@ port builds the message itself and asserts the resulting container length and
 outcome. The struct cases run through `Seq.reserveRow`, which is where the element
 index meets its `Bound`.
 
+`HeaderLimitsTest` runs the file's fourth block, the header-ceiling cases
+(CORELIB_PLAN §6.2.1 / §6.3). Each is a header that *declares* a length or a count
+and then ends, with no payload behind it: the ceiling is decided at that word,
+before the payload is asked for, so the answer is the ceiling's and it is terminal
+— a further feed re-raises rather than resuming. Which ceiling speaks is the
+subject, and the two give opposite answers on the same bytes: a schema `maxlen`
+makes them `INVALID_MSG`, a §6.2.1 receiver cap makes them `LIMIT_EXCEEDED`. The
+reader applies the case's ceiling at `Visitor.fixlenBegin`, through
+`PayloadAcc.checkStringLength` / `checkBlobLength`, as generated code does; an
+array's count has no library helper, so the reader states that rule out of the same
+`Bound`. Every rejection is paired with an in-cap control, which is carried through
+to `COMPLETE`, so the block cannot be passed by rejecting every short read — and
+`liftingTheReceiverCapsFallsBackToIncomplete` replays the rejections with the caps
+lifted to show the verdicts came from the ceiling.
+
 ### Feature flags
 
 **None** — the build always ships the full format.
