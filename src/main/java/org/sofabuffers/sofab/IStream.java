@@ -75,9 +75,21 @@ import static org.sofabuffers.sofab.WireFormat.zigzagDecode;
  * is ever <em>returned</em>: a rejected decode leaves through the {@code throw},
  * which is the one place the caller learns of it.
  *
- * <p><b>Both rejections are terminal.</b> Malformed bytes are malformed regardless
- * of what follows (§5.2), and a limit rejection is "a terminal, receiver-local
- * policy rejection" (§6.3), so the verdict sticks: every further {@code feed}
+ * <p><b>A third code joins them on that channel: the call was wrong.</b> The one
+ * place a caller hands this decoder storage is {@link Visitor#arrayBulk}, and a
+ * destination the decoder can fill but that is shorter than the announced count is
+ * refused with {@link SofabError#ARGUMENT} rather than grown or quietly declined
+ * (CORELIB_PLAN §6.6.3). It is §6.3's third way a value can be refused, and the
+ * only one that says nothing about the message: the bytes are well-formed and the
+ * same message decodes for a caller who sizes the destination right, so it is
+ * neither {@code INVALID_MSG} nor {@code LIMIT_EXCEEDED}, which would name a
+ * receiver cap nobody configured.
+ *
+ * <p><b>All three rejections are terminal.</b> Malformed bytes are malformed
+ * regardless of what follows (§5.2), a limit rejection is "a terminal,
+ * receiver-local policy rejection" (§6.3), and a refused destination leaves the
+ * parse position meaningless — the offer site is behind us and the array's payload
+ * was never consumed — so the verdict sticks: every further {@code feed}
  * re-throws the same code without decoding a byte. A caller that catches the
  * exception and keeps feeding therefore cannot resume mid-stream on a message the
  * decoder has already refused, nor read a {@code COMPLETE} out of it.
@@ -229,16 +241,27 @@ public final class IStream {
 
     /**
      * The latched terminal verdict, or {@code null} while the decode is still
-     * live: the {@link SofabError} of the rejection that ended it. Two codes end a
-     * decode and both latch here — {@link SofabError#INVALID_MSG}, the bytes are
-     * malformed and CORELIB_PLAN §5.2 makes that <b>terminal</b>, and
+     * live: the {@link SofabError} of the rejection that ended it. Three codes end
+     * a decode and all latch here — {@link SofabError#INVALID_MSG}, the bytes are
+     * malformed and CORELIB_PLAN §5.2 makes that <b>terminal</b>;
      * {@link SofabError#LIMIT_EXCEEDED}, "a <b>terminal</b>, receiver-local policy
-     * rejection" of well-formed bytes (§6.3) — and the code is kept rather than a
-     * flag because §6.3 forbids ever reporting the second as {@code InvalidMessage}.
-     * Set from {@link #feed}'s handler on the way out, so every rejection latches,
-     * wherever it is raised (in this class, or by the {@link Visitor} generated
-     * code drives). Once set, {@code feed} decodes nothing further and re-throws
-     * this code until {@link #reset()} starts a new message.
+     * rejection" of well-formed bytes (§6.3); and {@link SofabError#ARGUMENT}, a
+     * bulk destination refused as too short (§6.6.3) — and the code is kept rather
+     * than a flag because §6.3 forbids ever reporting the others as
+     * {@code InvalidMessage}.
+     *
+     * <p>The first two are latched from {@link #feed}'s handler on the way out, by
+     * {@link #isTerminal} on the code, so every rejection latches wherever it is
+     * raised (in this class, or by the {@link Visitor} generated code drives). The
+     * third is latched at its <b>refusal site</b> instead, and deliberately is not
+     * in {@code isTerminal}: {@code ARGUMENT} is §6.3's general "the call was
+     * wrong" category and a {@link Visitor} may raise it for reasons of its own
+     * (through {@link Sofab#argument}), so latching it by code would let one of
+     * those condemn a decoder whose message was fine. The site is what makes this
+     * one a decode verdict.
+     *
+     * <p>Once set, {@code feed} decodes nothing further and re-throws this code
+     * until {@link #reset()} starts a new message.
      */
     private SofabError terminal;
 
@@ -352,8 +375,10 @@ public final class IStream {
      * {@link SofabError#LIMIT_EXCEEDED} — a receiver-cap refusal of well-formed
      * bytes (§6.2.1) — is terminal too (§6.3) and behaves the same way, rethrown in
      * the carrier it arrived in and under its own code, never folded into
-     * {@code INVALID_MSG}. Running out of bytes mid-field is <em>not</em> that: it
-     * suspends and resumes on the next call, as before.
+     * {@code INVALID_MSG}. So is {@link SofabError#ARGUMENT}, raised where a
+     * {@link Visitor#arrayBulk} destination is too short for the count it was
+     * offered (§6.6.3). Running out of bytes mid-field is <em>not</em> any of that:
+     * it suspends and resumes on the next call, as before.
      *
      * @param data    backing array
      * @param off     start offset
@@ -363,7 +388,9 @@ public final class IStream {
      *         clean field boundary with no open sequence, else
      *         {@link DecodeStatus#INCOMPLETE}
      * @throws SofabException with {@link SofabError#INVALID_MSG} on malformed input,
-     *         or on any call after malformed input was already rejected
+     *         or on any call after malformed input was already rejected; with
+     *         {@link SofabError#ARGUMENT} where a bulk destination is too short for
+     *         the count it was offered, and on every call after that
      * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
      *         {@link SofabException} where a receiver limit refuses this message,
      *         and on every call after that
@@ -375,6 +402,13 @@ public final class IStream {
             // MUST NOT report a receiver-limit rejection as InvalidMessage.
             throw Sofab.limitExceeded(
                     "decode already refused by a receiver limit; reset() to start a new message");
+        }
+        if (terminal == SofabError.ARGUMENT) {
+            // Same rule, same reason (§6.3): a destination this caller sized wrong
+            // is not a statement that the bytes are bad, so it is repeated under
+            // its own code too and never folded into INVALID_MSG.
+            throw new SofabException(SofabError.ARGUMENT,
+                    "decode already refused a bulk destination; reset() to start a new message");
         }
         if (terminal != null) {
             throw new SofabException(SofabError.INVALID_MSG,
@@ -422,6 +456,13 @@ public final class IStream {
      * … policy rejection" per §6.3). The remaining codes belong to the encoder and
      * to argument checks and say nothing about the decode, so they pass through
      * without latching — as a visitor's own I/O failure does.
+     *
+     * <p>{@link SofabError#ARGUMENT} is <b>not</b> listed here even though the
+     * decoder's own §6.6.3 refusal of a too-short bulk destination is terminal.
+     * That refusal latches at its site ({@link #requireRoom}), because the code
+     * alone cannot tell it apart from an {@code ARGUMENT} a {@link Visitor} raised
+     * for reasons of its own — and condemning a decoder over one of those would
+     * end a decode whose message was never in question.
      */
     private static boolean isTerminal(SofabError error) {
         return error == SofabError.INVALID_MSG || error == SofabError.LIMIT_EXCEEDED;
@@ -1218,12 +1259,31 @@ public final class IStream {
 
     /**
      * Put the bulk offer to the visitor for an integer array of {@code c} elements
-     * and arm the fill if it is taken. A destination shorter than the announced
-     * count is refused rather than partially filled: {@code count} is the wire's
-     * claim, and a consumer that sized against a different number must not be able
-     * to turn that into an out-of-bounds write.
+     * and arm the fill if it is taken.
+     *
+     * <p><b>Declining and refusing are different answers.</b> {@code null} — or
+     * anything the decoder cannot fill — is the visitor <em>declining</em> the
+     * offer: no destination was handed over, so there is nothing to judge and the
+     * elements go out through {@link Visitor#unsigned} / {@link Visitor#signed} the
+     * ordinary way. A primitive integer array <em>shorter</em> than the announced
+     * count is a destination that was handed over and does not fit, which
+     * CORELIB_PLAN §6.6.3 requires be <b>refused</b> with
+     * {@link SofabError#ARGUMENT} — never grown, never filled part-way, and never
+     * silently swapped for per-element delivery.
+     *
+     * <p>Falling back would be the worse of the two failures it looks like it
+     * prevents. Not overrunning is necessary, but every {@link Visitor} method is a
+     * {@code default} no-op, so a visitor that overrode {@code arrayBulk} alone —
+     * the documented shape for an integer array — and mis-sized its destination
+     * would have every element delivered to an inherited no-op, never see
+     * {@link Visitor#arrayBulkEnd}, and read {@code COMPLETE} off the {@code feed}
+     * that dropped them: silent data loss on a well-formed message. §6.6.3 asks
+     * for a diagnostic, and a fallback is the opposite of one.
+     *
+     * @throws SofabException with {@link SofabError#ARGUMENT} if the destination is
+     *         a fillable array of fewer than {@code c} elements
      */
-    private void armBulk(Visitor visitor, int c) {
+    private void armBulk(Visitor visitor, int c) throws SofabException {
         bulkB = null;
         bulkS = null;
         bulkI = null;
@@ -1234,30 +1294,47 @@ public final class IStream {
             return;
         }
         Object dst = visitor.arrayBulk(id, arrayKind, c);
-        // One virtual call and one type resolution per ARRAY. Anything that is not
-        // a primitive integer array long enough for the announced count is refused
-        // and the elements go the ordinary way, so neither a miscounted nor a
-        // mistyped destination can overrun.
+        // One virtual call and one type resolution per ARRAY. A type the decoder
+        // cannot fill declines the offer; one it can fill but that is too short is
+        // refused, so neither a mistyped nor a miscounted destination can overrun
+        // and only the miscounted one is a mistake worth reporting.
         if (dst instanceof long[] a) {
-            if (a.length >= c) {
-                bulkL = a;
-                bulkW = W_LONG64;
-            }
+            requireRoom(a.length, c);
+            bulkL = a;
+            bulkW = W_LONG64;
         } else if (dst instanceof int[] a) {
-            if (a.length >= c) {
-                bulkI = a;
-                bulkW = W_INT32;
-            }
+            requireRoom(a.length, c);
+            bulkI = a;
+            bulkW = W_INT32;
         } else if (dst instanceof short[] a) {
-            if (a.length >= c) {
-                bulkS = a;
-                bulkW = W_SHORT16;
-            }
+            requireRoom(a.length, c);
+            bulkS = a;
+            bulkW = W_SHORT16;
         } else if (dst instanceof byte[] a) {
-            if (a.length >= c) {
-                bulkB = a;
-                bulkW = W_BYTE8;
-            }
+            requireRoom(a.length, c);
+            bulkB = a;
+            bulkW = W_BYTE8;
+        }
+    }
+
+    /**
+     * Refuse a bulk destination of {@code size} elements offered for an array of
+     * {@code c} (§6.6.3).
+     *
+     * <p>The verdict is latched <em>here</em>, not by {@link #feed}'s handler on
+     * the code the way the other two terminal rejections are — see
+     * {@link #terminal} and {@link #isTerminal} for why the site and not the code
+     * is what makes this one the decoder's. Continuing would be unsafe anyway: the
+     * offer site is behind us and the array's payload was never consumed, so the
+     * next {@code feed} would re-enter header parsing at a desynchronised byte and
+     * hand the refused array's own element bytes to the visitor as fields that were
+     * never on the wire.
+     */
+    private void requireRoom(int size, int c) throws SofabException {
+        if (size < c) {
+            terminal = SofabError.ARGUMENT;
+            throw new SofabException(SofabError.ARGUMENT,
+                    "bulk destination holds " + size + " elements, the array announced " + c);
         }
     }
 

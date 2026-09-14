@@ -168,10 +168,22 @@ public interface Visitor {
      * of <b>at least {@code count}</b> elements and the decoder writes straight into
      * {@code [0, count)} — already ZigZag-decoded for a signed array, exactly the
      * values {@link #signed} would have delivered — with no per-element callback at
-     * all, then calls {@link #arrayBulkEnd}. Return {@code null}, the default, and
-     * the elements arrive through {@link #unsigned} / {@link #signed} as before. A
-     * shorter array than {@code count}, or any other type, is treated as
-     * {@code null}, so a miscounted or mistyped destination cannot overrun.
+     * all, then calls {@link #arrayBulkEnd}. Return {@code null}, the default, or
+     * any other type, and the offer is <b>declined</b>: nothing was handed over, so
+     * the elements arrive through {@link #unsigned} / {@link #signed} as before.
+     *
+     * <p><b>A destination too short is refused, not declined.</b> Hand back one of
+     * the four array types with fewer than {@code count} elements and the decode
+     * fails with {@link SofabError#ARGUMENT} (CORELIB_PLAN §6.6.3: the codec
+     * refuses a destination too short rather than growing it). It is neither
+     * {@link SofabError#INVALID_MSG} — the message is well-formed and decodes for a
+     * caller who sizes the destination right — nor {@link SofabError#LIMIT_EXCEEDED},
+     * which would name a configured limit that does not exist. The mistake is in
+     * the call. Like a malformed message the refusal is terminal: every further
+     * {@link IStream#feed} rethrows it and {@link IStream#reset()} is the way on.
+     * Falling back to per-element delivery instead would be silent data loss for a
+     * visitor that overrides only this method, since every other one is a
+     * {@code default} no-op.
      *
      * <p><b>The array's width is a bound.</b> Handing back a narrower array than
      * {@code long[]} says the elements are declared that wide, so a value that does
@@ -200,7 +212,8 @@ public interface Visitor {
      * @param id    field id
      * @param kind  {@link ArrayKind#UNSIGNED} or {@link ArrayKind#SIGNED}
      * @param count number of elements the wire announced
-     * @return destination of at least {@code count} longs, or null for per-element
+     * @return destination of at least {@code count} elements, or null for
+     *         per-element delivery
      */
     default Object arrayBulk(int id, ArrayKind kind, int count) {
         return null;

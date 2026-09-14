@@ -57,7 +57,7 @@ is the package `org.sofabuffers.sofab`.
 | No per-field allocation | State lives in caller-provided buffers plus small `OStream` / `IStream` objects. Scalars stay primitive (`long` / `double`) — no autoboxing on the hot path. |
 | No reflection, no runtime codegen | Pure method calls; the decoder pushes to a `Visitor` interface. Suitable for GraalVM native-image and locked-down runtimes. |
 | Streaming **out** | `OStream` writes into a small caller buffer and invokes a `FlushSink` whenever it fills, so a message can exceed the buffer — and even RAM. |
-| Streaming **in** | `IStream` accepts arbitrarily small chunks; a message may split across `feed` calls at any byte boundary, and large string / blob payloads arrive in pieces. `feed` **returns** the outcome for the bytes seen so far — `COMPLETE` at a field boundary, `INCOMPLETE` mid-field — so there is one place to read it and no finish/finalize step. `INCOMPLETE` is not an error: the decode suspends and resumes on the next chunk. A refusal travels on the error channel instead: malformed bytes throw `SofabException` (`INVALID_MSG`), well-formed bytes a receiver cap declines throw `LIMIT_EXCEEDED` (§6.3). Both are **terminal** — every further `feed` rethrows that same code without decoding; `reset()` starts the next one. |
+| Streaming **in** | `IStream` accepts arbitrarily small chunks; a message may split across `feed` calls at any byte boundary, and large string / blob payloads arrive in pieces. `feed` **returns** the outcome for the bytes seen so far — `COMPLETE` at a field boundary, `INCOMPLETE` mid-field — so there is one place to read it and no finish/finalize step. `INCOMPLETE` is not an error: the decode suspends and resumes on the next chunk. A refusal travels on the error channel instead, under one of §6.3's three codes: malformed bytes throw `SofabException` (`INVALID_MSG`), well-formed bytes a receiver cap declines throw `LIMIT_EXCEEDED`, and a bulk destination too short for the count it was offered throws `ARGUMENT` (§6.6.3). All three are **terminal** — every further `feed` rethrows that same code without decoding; `reset()` starts the next one. |
 | Sparse sequence framing, still one pass | `writeSequenceBeginLazy` holds a sequence header back until a child field is actually written, so a sequence-typed **field** that receives no content is omitted rather than framed empty — decided in a single forward pass, with no sub-message buffering. Held-back ids are encoder state, not buffer content, so a tiny output buffer still produces the one-shot bytes. `writeSequenceEnd` drops such a sequence; `writeSequenceEndKeep` forces the frame out, and a wrapper-array **element** is always framed. The pending run grows on demand to the full `MAX_DEPTH` (255), so the output is canonical at every legal nesting depth. |
 | Reserve-offset | `new OStream(buf, offset)` leaves room at the front for a lower-layer protocol header, saving a copy. |
 | Explicit endianness | IEEE-754 values are written / read little-endian with explicit bit shifts, so behaviour is identical on every JVM. |
@@ -415,6 +415,21 @@ it is not part of the codec.
   the decoder narrows an incoming tag itself — rejecting the reserved values
   `0x4..0x7` in the single check that every site reading a `fixlen_word` runs — and
   hands the visitor the matching constant.
+- **The one route that *is* storage** is `Visitor.arrayBulk` (CORELIB_PLAN §6.6.3):
+  an integer array's elements are written straight into a destination the visitor
+  hands back, after being told the announced count. Return `null` — or anything the
+  decoder cannot fill — and the offer is **declined**: nothing was handed over, so
+  the elements arrive one at a time as before. Hand back a
+  `byte[]` / `short[]` / `int[]` / `long[]` **shorter than that count** and it is
+  **refused** with `SofabException` (`ARGUMENT`), never grown and never part-filled.
+  The mistake is in the call, so it is neither `INVALID_MSG` (the message is
+  well-formed and decodes for a caller who sizes the destination right) nor
+  `LIMIT_EXCEEDED` (which would name a receiver cap nobody configured) — §6.3's
+  three ways a value can be refused, one code each. Like those two the refusal is
+  **terminal**: every further `feed` rethrows `ARGUMENT` without decoding, and
+  `reset()` starts the next message. Falling back to per-element delivery instead
+  would be silent data loss, since a visitor that overrides only `arrayBulk` has a
+  no-op inherited for every other callback.
 
 ## Build & test
 
