@@ -292,6 +292,35 @@ class InvalidIsTerminalTest {
     }
 
     /**
+     * A visitor's own ARGUMENT (Sofab.argument: a Bound the call failed to state)
+     * is not a verdict on the message either - and in particular it is not the
+     * decoder's own §6.6.3 refusal of a too-short bulk destination, which IS
+     * terminal and carries the same code. That refusal is latched at its refusal
+     * site precisely so that latching by CODE here - widening isTerminal() to
+     * accept ARGUMENT - cannot condemn a decoder whose message was fine.
+     */
+    @Test
+    void aVisitorsOwnArgumentErrorDoesNotLatch() throws Exception {
+        IStream is = new IStream();
+        Visitor unbounded = new Visitor() {
+            @Override
+            public void unsigned(int id, long value) {
+                throw Sofab.argument("no Bound stated for field " + id);
+            }
+        };
+
+        UncheckedIOException e = assertThrows(UncheckedIOException.class,
+                () -> is.feed(bytes(0x00, 0x2A), unbounded));
+        assertEquals(SofabError.ARGUMENT, ((SofabException) e.getCause()).error());
+
+        // Nothing latched: the next feed decodes and answers for itself.
+        RecordingVisitor v = new RecordingVisitor();
+        assertEquals(DecodeStatus.COMPLETE, is.feed(bytes(0x08, 0x07), v),
+                "a call defect of the visitor's own is not a decode verdict");
+        assertEquals(List.of("u:1=7"), v.events);
+    }
+
+    /**
      * The mirror image: generated code rejects a schema bound (MESSAGE_SPEC §7.1)
      * with INVALID_MSG from a visitor callback, and that IS the INVALID outcome -
      * so the decoder it was rejected in must report it, not COMPLETE.
