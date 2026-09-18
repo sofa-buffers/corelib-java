@@ -1,5 +1,8 @@
 package org.sofabuffers.sofab;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -25,6 +28,26 @@ public final class Utf8 {
 
     private Utf8() {}
 
+    private static final VarHandle LE_LONG =
+            MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
+    private static final long HIGH_BITS = 0x8080808080808080L;
+
+    /**
+     * End of the ASCII run starting at {@code i}: the index of the first byte at
+     * or above {@code 0x80} in {@code b[i..end)}, or {@code end}. Eight bytes per
+     * step while eight remain, so the all-ASCII string -- most of what a schema
+     * carries -- costs one load and one test per word rather than per byte.
+     */
+    private static int asciiEnd(byte[] b, int i, int end) {
+        while (end - i >= 8 && ((long) LE_LONG.get(b, i) & HIGH_BITS) == 0) {
+            i += 8;
+        }
+        while (i < end && b[i] >= 0) {
+            i++;
+        }
+        return i;
+    }
+
     /**
      * Reports whether {@code b[i..end)} is well-formed UTF-8.
      *
@@ -41,9 +64,8 @@ public final class Utf8 {
      * @return true when the range is valid UTF-8
      */
     public static boolean valid(byte[] b, int i, int end) {
-        while (i < end) {
+        while ((i = asciiEnd(b, i, end)) < end) {
             int c = b[i] & 0xff;
-            if (c < 0x80) { i++; continue; }
             int n, lo, hi;
             // The second byte's legal range depends on the lead: it is what
             // excludes the overlong forms (E0 A0.., F0 90..) and the surrogates
@@ -89,7 +111,15 @@ public final class Utf8 {
      *                                      not valid UTF-8
      */
     public static String decode(byte[] b, int off, int len) {
-        if (!valid(b, off, off + len)) {
+        int end = off + len;
+        int a = asciiEnd(b, off, end);
+        if (a == end) {
+            // All ASCII, so already proven valid, and every byte is its own char:
+            // ISO-8859-1 is then the identical decoding without the JDK's own
+            // second scan for non-ASCII bytes -- a plain copy into a Latin-1 String.
+            return new String(b, off, len, StandardCharsets.ISO_8859_1);
+        }
+        if (!valid(b, a, end)) {
             throw Sofab.invalid("string: invalid UTF-8");
         }
         return new String(b, off, len, StandardCharsets.UTF_8);
