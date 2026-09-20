@@ -1,11 +1,13 @@
 /*
- * SofaBuffers Java - the shared `header_limits` block (CORELIB_PLAN §6.2.1, §6.3).
+ * SofaBuffers Java - the shared `header_limits` and `header_limits_nested`
+ * blocks (CORELIB_PLAN §6.2.1, §6.3).
  *
  * SPDX-License-Identifier: MIT
  */
 
 package org.sofabuffers.sofab;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -19,6 +21,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -94,6 +97,32 @@ import org.junit.jupiter.params.provider.MethodSource;
  * and therefore <em>tells</em> the port which ceiling to configure. Nothing in this
  * class is a claim about any deployment's configuration — the ceilings live per case
  * and nothing outlives the run.
+ *
+ * <p><b>And the same assertion one or two frames deeper.</b> {@code header_limits_nested}
+ * is a second top-level block carrying the identical question with the field moved
+ * <em>inside</em> an open sequence — the one axis the flat block leaves untested,
+ * because every case there puts its field at the top level:
+ *
+ * <pre>
+ * 3e 1e 02 a2 06   then EOF
+ * ^^ id 7, wire type 6 — a sequence opens
+ *    ^^ id 3, wire type 6 — and another inside it
+ *       ^^^^^^^^ the same 100-byte string, now two frames down
+ *                ... and the message ends, with BOTH frames still open.
+ * </pre>
+ *
+ * <p>Depth is its own axis because a port can bind its ceiling to the top-level
+ * scope and cap nothing below it, and because these bytes hand the decoder a
+ * <b>second, independent reason</b> to say {@code INCOMPLETE}: a frame really is
+ * open. That is what makes {@link #liftingTheNestedCeilingChangesEveryRejection}
+ * load-bearing rather than decorative — it is the only thing that separates "the
+ * ceiling fired" from "something else refused an unclosed frame".
+ *
+ * <p>The two blocks run through the <b>same</b> leaf, {@link HeaderDest}, driven by
+ * the same {@link #runCeilingCase}: a case's {@code frames} chain is the <em>only</em>
+ * thing that differs, and a flat case is simply one with an empty chain. A second
+ * implementation for the nested path could make it pass by a mechanism the flat path
+ * never uses, which would defeat the block.
  */
 class HeaderLimitsTest {
 
@@ -103,12 +132,13 @@ class HeaderLimitsTest {
      * as "unsupported", which would skip the case and still report a pass.
      */
     private static final Set<String> KNOWN_TAGS =
-            Set.of("fixlen", "array", "int64", "receiver_caps");
+            Set.of("fixlen", "array", "int64", "sequence", "receiver_caps");
 
     /**
      * The tags <b>this</b> port satisfies.
      *
-     * <p>The wire tags are all of them: this corelib compiles every feature in and
+     * <p>The wire tags — {@code fixlen}, {@code array}, {@code int64},
+     * {@code sequence} — are all of them: this corelib compiles every feature in and
      * has no {@code SOFAB_DISABLE_*} equivalent. {@code receiver_caps} is a
      * <b>profile</b> capability rather than a wire one — a port declares it when its
      * generated code carries §6.2.1 receiver caps <em>distinct from</em> schema
@@ -136,28 +166,85 @@ class HeaderLimitsTest {
      */
     private static final Bound UNCAPPED = Bound.receiver(Integer.MAX_VALUE);
 
-    /** A byte to feed after a terminal rejection; any byte does. */
-    private static final byte[] ONE_MORE_BYTE = { 0x61 };
+    /**
+     * The schema bound lifted, for the nested negative control only. Far above every
+     * {@code declared} in that block and small enough that lifting it cannot provoke
+     * an absurd allocation — and a case declaring more than this could not be
+     * controlled by lifting at all, which {@link #liftingTheNestedCeilingChangesEveryRejection}
+     * says out loud rather than skipping quietly.
+     */
+    private static final int LIFTED_BOUND = 65536;
 
-    private static final List<JsonObject> CASES = load();
+    /**
+     * What to feed after a terminal rejection: the payload the header promised, in
+     * its strongest form — eight bytes that <em>would</em> be legal content for every
+     * construct in either block ({@code 0x61} is an 'a' in a string or blob and a
+     * one-byte varint in an integer array). Asking the decoder what its last error was
+     * would prove nothing; a decoder that consumed these and moved on would look
+     * terminal. §6.3 is about what happens to the next bytes, so the next bytes are
+     * what the assertion sends.
+     */
+    private static final byte[] WOULD_BE_PAYLOAD =
+            { 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61 };
 
-    /** Cases actually executed / skipped by {@code requires}; reported by {@link #reportWhatRan}. */
-    private static final AtomicInteger RAN = new AtomicInteger();
-    private static final AtomicInteger SKIPPED = new AtomicInteger();
+    /** The sequence-end marker, §4.9's {@code 0x07}: one per frame a nested case left open. */
+    private static final byte[] SEQUENCE_END = { 0x07 };
 
-    private static List<JsonObject> load() {
+    /** A case whose field sits in the top-level scope opens no frame at all. */
+    private static final int[] TOP_LEVEL = {};
+
+    private static final List<JsonObject> CASES = load("header_limits");
+
+    /**
+     * The nested block: the same cases one or two sequence frames deeper. A separate
+     * top-level block deliberately — its byte strings start with a sequence header,
+     * so a runner that ignored {@code frames} would bind its ceiling at the top level
+     * and answer {@code INCOMPLETE} where the case demands a rejection.
+     */
+    private static final List<JsonObject> NESTED = load("header_limits_nested");
+
+    /**
+     * What one block's run reported. §5 of the block's spec makes this mandatory
+     * rather than cosmetic: a mis-spelled capability name or a probe that answers
+     * "unsupported" by accident turns the runner into a no-op that reports green,
+     * and {@code ran + gated == total} is the cheap way to notice.
+     */
+    private record Tally(String block, AtomicInteger ran, AtomicInteger gated,
+            List<String> gatedBy) {
+
+        Tally(String block) {
+            this(block, new AtomicInteger(), new AtomicInteger(),
+                    Collections.synchronizedList(new ArrayList<>()));
+        }
+
+        void report(int total) {
+            System.out.println("[test_vectors] " + block + ": " + ran.get() + " cases run, "
+                    + gated.get() + " gated by requires" + (gatedBy.isEmpty() ? "" : " " + gatedBy));
+            assertTrue(ran.get() > 0, "every " + block + " case was gated; the block tested nothing");
+            assertEquals(total, ran.get() + gated.get(),
+                    block + ": ran + gated must account for every case in the block");
+        }
+    }
+
+    private static final Tally FLAT = new Tally("header_limits");
+    private static final Tally NESTED_TALLY = new Tally("header_limits_nested");
+
+    /** The deepest frame chain a nested case actually ran at; §8 item 10's guard. */
+    private static final AtomicInteger DEEPEST_RUN = new AtomicInteger();
+
+    private static List<JsonObject> load(String blockName) {
         try (InputStream in = HeaderLimitsTest.class.getClassLoader()
                 .getResourceAsStream("test_vectors.json")) {
             assertNotNull(in, "assets/test_vectors.json is not on the test classpath");
             JsonObject root = JsonParser.parseReader(
                     new InputStreamReader(in, StandardCharsets.UTF_8)).getAsJsonObject();
-            JsonArray block = root.getAsJsonArray("header_limits");
-            assertNotNull(block, "no header_limits block: §6.2.1 has no corpus to run");
+            JsonArray block = root.getAsJsonArray(blockName);
+            assertNotNull(block, "no " + blockName + " block: §6.2.1 has no corpus to run");
             List<JsonObject> cases = new ArrayList<>();
             for (JsonElement e : block) {
                 cases.add(e.getAsJsonObject());
             }
-            assertFalse(cases.isEmpty(), "header_limits block is empty");
+            assertFalse(cases.isEmpty(), blockName + " block is empty");
             return cases;
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -185,12 +272,33 @@ class HeaderLimitsTest {
     }
 
     /**
-     * Read the ceiling out of a case. {@code lifted} answers the negative control:
-     * every receiver cap raised out of the way, the schema bound left exactly as
-     * stated — a schema bound is not a receiver policy, and lifting it would be a
-     * different experiment.
+     * Which ceilings a run raises out of the way — the axis the negative controls
+     * turn.
      */
-    private static Ceiling ceilingOf(JsonObject c, boolean lifted) {
+    private enum Lift {
+        /** Exactly what the case states: the forward pass. */
+        NONE,
+
+        /**
+         * Every receiver cap raised, the schema bound left exactly as stated. The
+         * flat block's control: a schema bound is not a receiver policy, so the
+         * schema-bounded case is asserted to keep its {@code INVALID} verdict.
+         */
+        CAPS,
+
+        /**
+         * Whichever single ceiling the case states, raised — a {@code limits} case
+         * gets a lifted cap, a {@code schema} case a lifted bound. The nested
+         * block's control needs this: it must show the answer <em>changed</em> for
+         * <b>every</b> rejection, the schema-bounded one included, because there a
+         * verdict that survives the lift is a verdict some other rule produced
+         * (a depth guard, or a refusal of the frames these cases leave open).
+         */
+        STATED_CEILING,
+    }
+
+    /** Read the ceiling out of a case, with {@code lift} applied. */
+    private static Ceiling ceilingOf(JsonObject c, Lift lift) {
         String name = nameOf(c);
         JsonObject limits = c.has("limits") ? c.getAsJsonObject("limits") : null;
         JsonObject schema = c.has("schema") ? c.getAsJsonObject("schema") : null;
@@ -199,7 +307,9 @@ class HeaderLimitsTest {
                         + "schema-bounded field");
         if (schema != null) {
             assertEquals(Set.of("maxlen"), schema.keySet(), name + ": unknown schema key(s)");
-            return new Ceiling(schema.get("maxlen").getAsInt(), null, null, null);
+            int declaredBound = lift == Lift.STATED_CEILING
+                    ? LIFTED_BOUND : schema.get("maxlen").getAsInt();
+            return new Ceiling(declaredBound, null, null, null);
         }
         assertNotNull(limits, name + " carries neither limits nor schema");
         assertEquals(1, limits.size(), name + " states " + limits.size()
@@ -208,16 +318,16 @@ class HeaderLimitsTest {
             assertTrue(KNOWN_LIMITS.contains(k), name + ": unknown receiver cap " + k);
         }
         return new Ceiling(NO_SCHEMA_BOUND,
-                capOf(limits, "max_dyn_string_len", lifted),
-                capOf(limits, "max_dyn_blob_len", lifted),
-                capOf(limits, "max_dyn_array_count", lifted));
+                capOf(limits, "max_dyn_string_len", lift),
+                capOf(limits, "max_dyn_blob_len", lift),
+                capOf(limits, "max_dyn_array_count", lift));
     }
 
-    private static Bound capOf(JsonObject limits, String key, boolean lifted) {
+    private static Bound capOf(JsonObject limits, String key, Lift lift) {
         if (!limits.has(key)) {
             return null;
         }
-        return lifted ? UNCAPPED : Bound.receiver(limits.get(key).getAsLong());
+        return lift == Lift.NONE ? Bound.receiver(limits.get(key).getAsLong()) : UNCAPPED;
     }
 
     // --- the destination, standing in for the generated layer --------------------
@@ -231,21 +341,105 @@ class HeaderLimitsTest {
      * that rejects still proves the header was read as the case describes — the number
      * the ceiling was compared against is the one on the wire, not one this reader
      * supplied.
+     *
+     * <p><b>Where the ceiling is bound.</b> {@code frames} is the chain of sequence
+     * ids the target field sits in, outermost first, straight out of the case; the
+     * flat block's cases pass {@link #TOP_LEVEL}, the empty chain. The ceiling is
+     * applied <b>only</b> at that exact depth: the decoder pushes and pops the chain
+     * through {@link Visitor#sequenceBegin} / {@link Visitor#sequenceEnd} — this
+     * port's ordinary nested-sequence decode path, the same one generated code walks
+     * — and a header announced anywhere else is skipped, as generated code skips a
+     * field it is not interested in. One leaf, one comparison, two blocks: a flat
+     * case is a nested case whose chain is empty.
      */
     private static final class HeaderDest implements Visitor {
         private final Ceiling ceiling;
+
+        /** The sequence ids this case's field is nested in, outermost first. */
+        private final int[] frames;
+
+        /** The sequence ids currently open, innermost last — the decoder's own chain. */
+        private final List<Integer> openFrames = new ArrayList<>();
+
         private final List<String> events = new ArrayList<>();
         private FixlenType subtype;
         private ArrayKind kind;
         private int headerId = -1;
         private int announced = -1;
 
-        HeaderDest(Ceiling ceiling) {
+        /**
+         * Payload bytes / array elements actually handed over. §6.2.1 is "rejected,
+         * never clamped": after a ceiling fires this must still be zero, so a
+         * decoder that truncates to the cap and materializes the head of the value
+         * is caught even when it also reports the right error.
+         */
+        private int materialized;
+
+        HeaderDest(Ceiling ceiling, int[] frames) {
             this.ceiling = ceiling;
+            this.frames = frames;
+        }
+
+        @Override
+        public void sequenceBegin(int id) {
+            events.add("seq:" + id);
+            openFrames.add(id);
+        }
+
+        @Override
+        public void sequenceEnd() {
+            events.add("seq-end");
+            assertFalse(openFrames.isEmpty(), "sequenceEnd with no open frame");
+            openFrames.remove(openFrames.size() - 1);
+        }
+
+        /**
+         * True when the decoder is inside exactly the frame chain the case names —
+         * the one scope whose fields this case's ceiling governs.
+         */
+        private boolean insideTheCasesFrames() {
+            if (openFrames.size() != frames.length) {
+                return false;
+            }
+            for (int i = 0; i < frames.length; i++) {
+                if (openFrames.get(i) != frames[i]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        @Override
+        public void string(int id, int total, int offset, byte[] data, int chunkOffset,
+                int chunkLength) {
+            materialized += chunkLength;
+        }
+
+        @Override
+        public void blob(int id, int total, int offset, byte[] data, int chunkOffset,
+                int chunkLength) {
+            materialized += chunkLength;
+        }
+
+        @Override
+        public void unsigned(int id, long value) {
+            materialized++;
+        }
+
+        @Override
+        public void signed(int id, long value) {
+            materialized++;
         }
 
         @Override
         public void fixlenBegin(int id, FixlenType subtype, int total) {
+            if (!insideTheCasesFrames()) {
+                // Another scope's field: not this case's subject. Left to the
+                // decoder to skip, exactly as generated code leaves a field it does
+                // not carry — and never measured against this case's ceiling.
+                events.add("elsewhere-fixlen:" + id + "@" + openFrames);
+                return;
+            }
             events.add("fixlen:" + id + ":" + subtype + ":" + total);
             this.subtype = subtype;
             this.headerId = id;
@@ -280,6 +474,10 @@ class HeaderLimitsTest {
 
         @Override
         public void arrayBegin(int id, ArrayKind kind, int count) {
+            if (!insideTheCasesFrames()) {
+                events.add("elsewhere-array:" + id + "@" + openFrames);
+                return;
+            }
             events.add("array:" + id + ":" + kind + ":" + count);
             this.kind = kind;
             this.headerId = id;
@@ -355,12 +553,25 @@ class HeaderLimitsTest {
         return parts;
     }
 
-    /** Feed every part; returns what the LAST feed answered (§5.2.4). */
+    /**
+     * Feed every part; returns what the LAST feed answered (§5.2.4).
+     *
+     * <p>Every feed <em>before</em> the last must answer {@code INCOMPLETE}: a verdict
+     * reached earlier would be a verdict reached on bytes the decoder had not yet been
+     * given. That holds for a case's {@code chunks} and equally for the continuation an
+     * in-cap control sends, where the payload and each but the last sequence-end marker
+     * still leave the message open.
+     */
     private static DecodeStatus feed(IStream in, HeaderDest dest, List<byte[]> parts)
             throws SofabException {
         DecodeStatus st = DecodeStatus.COMPLETE;
-        for (byte[] part : parts) {
-            st = in.feed(part, dest);
+        for (int i = 0; i < parts.size(); i++) {
+            st = in.feed(parts.get(i), dest);
+            if (i + 1 < parts.size()) {
+                assertEquals(DecodeStatus.INCOMPLETE, st,
+                        "feed " + (i + 1) + " of " + parts.size() + " answered " + st
+                                + " before the message was whole");
+            }
         }
         return st;
     }
@@ -424,10 +635,29 @@ class HeaderLimitsTest {
         throw new AssertionError("no header was announced, so there is no payload to complete");
     }
 
+    /**
+     * Everything an in-cap control still owes the decoder: the payload the header
+     * announced, then one sequence-end marker per frame the case left open. Only the
+     * <em>control</em> ever sends these — the rejection cases stop at the truncation,
+     * because the truncation is the case.
+     */
+    private static List<byte[]> rest(HeaderDest dest, int declared, int openFrames) {
+        List<byte[]> more = new ArrayList<>();
+        more.add(payloadFor(dest, declared));
+        for (int i = 0; i < openFrames; i++) {
+            more.add(SEQUENCE_END);
+        }
+        return more;
+    }
+
     // --- the cases ---------------------------------------------------------------
 
     static Stream<String> caseNames() {
         return CASES.stream().map(HeaderLimitsTest::nameOf);
+    }
+
+    static Stream<String> nestedCaseNames() {
+        return NESTED.stream().map(HeaderLimitsTest::nameOf);
     }
 
     /**
@@ -438,27 +668,49 @@ class HeaderLimitsTest {
     @ParameterizedTest
     @MethodSource("caseNames")
     void headerCeilingCaseMatchesItsExpectation(String name) throws SofabException {
-        JsonObject c = byName(name);
+        runCeilingCase(byName(CASES, name), FLAT);
+    }
+
+    /**
+     * The same assertion, in the scope the case's {@code frames} name. Same runner,
+     * same leaf, same ceilings: the chain is the only difference, which is what makes
+     * a pass here a statement about the nested path rather than about a second
+     * implementation of it.
+     */
+    @ParameterizedTest
+    @MethodSource("nestedCaseNames")
+    void nestedHeaderCeilingCaseMatchesItsExpectation(String name) throws SofabException {
+        runCeilingCase(byName(NESTED, name), NESTED_TALLY);
+    }
+
+    /** Run one case of either block, and tally it. */
+    private static void runCeilingCase(JsonObject c, Tally tally) throws SofabException {
+        String name = nameOf(c);
         List<String> needs = requiresOf(c);
         for (String tag : needs) {
             assertTrue(KNOWN_TAGS.contains(tag), name + ": unknown capability tag " + tag);
         }
-        // In THIS block an unsatisfied tag means SKIP, for every tag — not the
+        // In THESE blocks an unsatisfied tag means SKIP, for every tag — not the
         // reduced-build rejection a *vector* gets. These cases already assert a
         // rejection WITH A SPECIFIC CATEGORY, so a build that cannot represent the
         // construct would reject it for an unrelated reason and appear to pass
         // while testing nothing.
         if (!SATISFIED.containsAll(needs)) {
-            SKIPPED.incrementAndGet();
+            List<String> missing = new ArrayList<>(needs);
+            missing.removeAll(SATISFIED);
+            tally.gated().incrementAndGet();
+            tally.gatedBy().add(name + " (" + missing + ")");
             Assumptions.abort(name + " requires " + needs + ", which this port does not provide");
         }
-        RAN.incrementAndGet();
+        tally.ran().incrementAndGet();
 
         JsonObject expect = c.getAsJsonObject("expect");
         String outcome = expect.get("outcome").getAsString();
         boolean terminal = expect.has("terminal") && expect.get("terminal").getAsBoolean();
         int declared = c.get("declared").getAsInt();
-        HeaderDest dest = new HeaderDest(ceilingOf(c, false));
+        int[] frames = framesOf(c);
+        DEEPEST_RUN.accumulateAndGet(frames.length, Math::max);
+        HeaderDest dest = new HeaderDest(ceilingOf(c, Lift.NONE), frames);
         IStream in = new IStream();
         List<byte[]> parts = chunksOf(c);
 
@@ -467,11 +719,12 @@ class HeaderLimitsTest {
                 assertFalse(expect.has("terminal"), name + ": `terminal` on an incomplete case");
                 assertEquals(DecodeStatus.INCOMPLETE, feed(in, dest, parts), name + ": status");
                 assertHeaderRead(name, c, dest, declared);
-                // The control's whole point: the ceiling ADMITS this length, so
-                // the payload still decodes and the message completes. A port that
-                // rejected every short read would already have failed above.
+                // The control's whole point: the ceiling ADMITS this length, so the
+                // payload still decodes and — once the frames the case left open are
+                // closed — the message completes. A port that rejected every short
+                // read, or every open frame, would already have failed above.
                 assertEquals(DecodeStatus.COMPLETE,
-                        in.feed(payloadFor(dest, declared), dest),
+                        feed(in, dest, rest(dest, declared, frames.length)),
                         name + ": the admitted payload completes");
             }
             case "limit_exceeded" -> {
@@ -517,9 +770,12 @@ class HeaderLimitsTest {
      */
     @AfterAll
     static void reportWhatRan() {
-        System.out.println("[test_vectors] header_limits: " + RAN.get() + " cases run, "
-                + SKIPPED.get() + " skipped by requires");
-        assertTrue(RAN.get() > 0, "every header_limits case was skipped; the block tested nothing");
+        FLAT.report(CASES.size());
+        NESTED_TALLY.report(NESTED.size());
+        // One level may be special-cased, so the depth-2 pair has to have ACTUALLY
+        // run — not merely been loaded and then gated or mis-dispatched.
+        assertTrue(DEEPEST_RUN.get() >= 2,
+                "no case ran two frames deep; the depth-2 pair never executed");
     }
 
     /**
@@ -543,7 +799,7 @@ class HeaderLimitsTest {
         List<String> before = List.copyOf(dest.events);
         Throwable again = null;
         try {
-            in.feed(ONE_MORE_BYTE, dest);
+            in.feed(WOULD_BE_PAYLOAD, dest);
         } catch (SofabException | UncheckedIOException e) {
             again = e;
         }
@@ -553,6 +809,11 @@ class HeaderLimitsTest {
         assertEquals(want, categoryOf(again), name + ": the re-raised category");
         assertEquals(before, dest.events,
                 name + ": the further feed was decoded rather than refused");
+        // "Rejected, never clamped" (§6.2.1): checked AFTER the second feed, so a
+        // decoder that truncates to the ceiling and materializes the head of the
+        // value late is caught too.
+        assertEquals(0, dest.materialized,
+                name + ": bytes reached the destination despite the rejection");
     }
 
     /**
@@ -581,7 +842,7 @@ class HeaderLimitsTest {
                 continue;
             }
 
-            HeaderDest dest = new HeaderDest(ceilingOf(c, true));
+            HeaderDest dest = new HeaderDest(ceilingOf(c, Lift.CAPS), framesOf(c));
             IStream in = new IStream();
             if (c.has("schema")) {
                 // A schema bound is not a receiver cap and was not lifted.
@@ -659,8 +920,8 @@ class HeaderLimitsTest {
         // THE PAIR THAT KEEPS THE TWO CATEGORIES APART: identical bytes, opposite
         // answers, and the only difference is which ceiling the case configures. A port
         // that routes both to one category passes every other case and fails this one.
-        JsonObject cap = byName("header_string_over_cap");
-        JsonObject bound = byName("header_string_schema_bounded");
+        JsonObject cap = byName(CASES, "header_string_over_cap");
+        JsonObject bound = byName(CASES, "header_string_schema_bounded");
         assertEquals(cap.get("serialized").getAsString(), bound.get("serialized").getAsString(),
                 "the pair no longer carries identical bytes");
         assertEquals("limit_exceeded",
@@ -674,13 +935,139 @@ class HeaderLimitsTest {
     }
 
     /**
-     * {@code requires} is honoured per case, and every tag the block uses is one this
-     * port has been told about. An unknown tag read as "unsupported" would skip the
-     * case and still report a pass.
+     * THE NESTED BLOCK'S NEGATIVE CONTROL, and the reason the block is worth having.
+     *
+     * <p>These cases end with their frames <b>still open</b>, which hands the decoder
+     * a second, fully independent reason to answer {@code INCOMPLETE} — and, the other
+     * way round, a second way to produce a rejection that has nothing to do with the
+     * ceiling: a depth guard, a frame-count guard, a rule against unclosed frames, a
+     * strict-mode path. A runner with no control cannot tell that apart from the
+     * enforcement point it claims to be testing; it reports coverage it does not have.
+     *
+     * <p>So the block is run a second time with the ceiling each case states
+     * <b>lifted</b> — a receiver cap for a {@code limits} case, the schema bound for a
+     * {@code schema} case, never the other kind and never both — and every rejection
+     * must now answer something <em>else</em>. The assertion is inequality, not
+     * {@code INCOMPLETE}: what is being shown is that the ceiling is what decided,
+     * not what the alternative answer happens to be.
+     *
+     * <p>And the number of cases the pass examined is asserted, because a control that
+     * {@code continue}s through every iteration is green and proves nothing.
+     */
+    @Test
+    void liftingTheNestedCeilingChangesEveryRejection() {
+        List<String> evidence = new ArrayList<>();
+        int checked = 0;
+
+        for (JsonObject c : NESTED) {
+            String name = nameOf(c);
+            if (!SATISFIED.containsAll(requiresOf(c))) {
+                continue;
+            }
+            // Only a rejection can be shown to depend on its ceiling.
+            SofabError want = rejectionCategory(c);
+            if (want == null) {
+                continue;
+            }
+            // This block has no amplification case, so the flat block's one exemption
+            // does not apply here: every rejection must be covered, and a case that
+            // could not be says so instead of being skipped quietly.
+            assertTrue(c.get("declared").getAsInt() < LIFTED_BOUND, name
+                    + ": declares more than the lifted ceiling, so the control cannot cover it");
+
+            HeaderDest dest = new HeaderDest(ceilingOf(c, Lift.STATED_CEILING), framesOf(c));
+            Outcome got = rejectionFrom(new IStream(), dest, chunksOf(c));
+            String now = got.thrown() == null
+                    ? String.valueOf(got.status()) : String.valueOf(categoryOf(got.thrown()));
+            if (got.thrown() != null && categoryOf(got.thrown()) == want) {
+                fail(name + ": the answer did not change when the ceiling was lifted — " + want
+                        + " came from something other than the ceiling (an unclosed-frame, depth "
+                        + "or strict-mode rule), so the forward pass proves nothing");
+            }
+            evidence.add(name + ": " + want + " -> " + now);
+            checked++;
+        }
+
+        System.out.println("[test_vectors] header_limits_nested/control: " + checked
+                + " rejections re-run with the ceiling lifted " + evidence);
+        assertEquals(rejectionsThisPortRuns(NESTED), checked,
+                "the control pass examined a different number of cases than the gate admits");
+        assertTrue(checked >= 4, "the nested block carries four rejections; the control "
+                + "examined only " + checked);
+    }
+
+    /**
+     * The nested block's inventory: floors and structure, so upstream growing the block
+     * does not fail this port, while a block that lost its axis or its controls does.
+     */
+    @Test
+    void theNestedBlockCarriesDepthAndItsControls() {
+        assertTrue(NESTED.size() >= 8,
+                "header_limits_nested carries " + NESTED.size() + " cases, want at least 8");
+
+        boolean twoDeep = false;
+        Set<String> outcomes = new HashSet<>();
+        for (JsonObject c : NESTED) {
+            int[] frames = framesOf(c);
+            assertTrue(frames.length > 0, nameOf(c)
+                    + ": a case of the nested block with no frames tests the flat axis");
+            assertTrue(requiresOf(c).contains("sequence"), nameOf(c)
+                    + ": a nested case needs the sequence capability");
+            twoDeep |= frames.length >= 2;
+            outcomes.add(c.getAsJsonObject("expect").get("outcome").getAsString());
+        }
+        // One level may be special-cased — a chain builder off by one descends once
+        // and then reads the inner sequence header as the target field.
+        assertTrue(twoDeep, "no case nests two frames deep");
+        for (String o : new String[] {"limit_exceeded", "invalid", "incomplete"}) {
+            assertTrue(outcomes.contains(o), "no nested case expecting " + o);
+        }
+
+        // Every rejection is paired with an in-cap control ON THE SAME CEILING AND THE
+        // SAME CHAIN: without it a port that rejects everything nested — which is badly
+        // broken — passes all four rejections.
+        Set<String> admitted = new LinkedHashSet<>();
+        for (JsonObject c : NESTED) {
+            if (rejectionCategory(c) == null) {
+                admitted.add(ceilingKey(c) + "@" + Arrays.toString(framesOf(c)));
+            }
+        }
+        for (JsonObject c : NESTED) {
+            if (rejectionCategory(c) == null) {
+                continue;
+            }
+            String key = ceilingKey(c) + "@" + Arrays.toString(framesOf(c));
+            assertTrue(admitted.contains(key), nameOf(c) + " rejects on " + key
+                    + " with no in-cap control on the same ceiling at the same depth");
+            assertTrue(c.getAsJsonObject("expect").get("terminal").getAsBoolean(),
+                    nameOf(c) + ": a rejection is terminal");
+        }
+
+        // The pair that keeps the two categories apart, one frame down: identical
+        // bytes at identical depth, and only the ceiling the case configures differs.
+        JsonObject cap = byName(NESTED, "nested_string_over_cap");
+        JsonObject bound = byName(NESTED, "nested_string_schema_bounded");
+        assertEquals(cap.get("serialized").getAsString(), bound.get("serialized").getAsString(),
+                "the nested pair no longer carries identical bytes");
+        assertArrayEquals(framesOf(cap), framesOf(bound), "the nested pair sits at two depths");
+        assertEquals("limit_exceeded", cap.getAsJsonObject("expect").get("outcome").getAsString());
+        assertEquals("invalid", bound.getAsJsonObject("expect").get("outcome").getAsString());
+        assertTrue(cap.has("limits") && !cap.has("schema"),
+                "nested_string_over_cap states a receiver cap");
+        assertTrue(bound.has("schema") && !bound.has("limits"),
+                "nested_string_schema_bounded states a schema bound");
+    }
+
+    /**
+     * {@code requires} is honoured per case, and every tag either block uses is one
+     * this port has been told about. An unknown tag read as "unsupported" would skip
+     * the case and still report a pass.
      */
     @Test
     void everyCaseCarriesKnownRequiresTags() {
-        for (JsonObject c : CASES) {
+        List<JsonObject> both = new ArrayList<>(CASES);
+        both.addAll(NESTED);
+        for (JsonObject c : both) {
             List<String> needs = requiresOf(c);
             assertFalse(needs.isEmpty(), nameOf(c) + " carries no requires tags");
             for (String tag : needs) {
@@ -688,7 +1075,7 @@ class HeaderLimitsTest {
             }
             // The cap cases are the ones gated on the profile capability; the
             // schema-bounded pair needs no cap and must stay runnable for a port that
-            // has none.
+            // has none — in the nested block too, where such a port runs 4 of 8.
             assertEquals(c.has("limits"), needs.contains("receiver_caps"),
                     nameOf(c) + ": receiver_caps tag vs the ceiling it states");
         }
@@ -710,6 +1097,32 @@ class HeaderLimitsTest {
         return tags;
     }
 
+    /**
+     * The category a case expects to be rejected with, or {@code null} where it
+     * expects no rejection at all — the in-cap controls, which no negative control
+     * can say anything about.
+     */
+    private static SofabError rejectionCategory(JsonObject c) {
+        String outcome = c.getAsJsonObject("expect").get("outcome").getAsString();
+        return switch (outcome) {
+            case "limit_exceeded" -> SofabError.LIMIT_EXCEEDED;
+            case "invalid" -> SofabError.INVALID_MSG;
+            case "incomplete", "complete" -> null;
+            default -> throw new AssertionError(nameOf(c) + ": unknown outcome " + outcome);
+        };
+    }
+
+    /** How many of a block's rejections this port's gate admits — the control's count. */
+    private static int rejectionsThisPortRuns(List<JsonObject> block) {
+        int n = 0;
+        for (JsonObject c : block) {
+            if (rejectionCategory(c) != null && SATISFIED.containsAll(requiresOf(c))) {
+                n++;
+            }
+        }
+        return n;
+    }
+
     private static String ceilingKey(JsonObject c) {
         if (!c.has("limits")) {
             return "schema";
@@ -719,8 +1132,27 @@ class HeaderLimitsTest {
         return keys.iterator().next();
     }
 
-    private static JsonObject byName(String name) {
-        return CASES.stream().filter(c -> nameOf(c).equals(name)).findFirst()
+    /**
+     * The chain of sequence ids the case's field is nested in, <b>outermost first</b>
+     * — the whole point of {@code header_limits_nested}, and empty for a flat case,
+     * whose field sits in the top-level scope.
+     */
+    private static int[] framesOf(JsonObject c) {
+        if (!c.has("frames")) {
+            return TOP_LEVEL;
+        }
+        JsonArray frames = c.getAsJsonArray("frames");
+        assertFalse(frames.isEmpty(), nameOf(c)
+                + ": an empty frames chain is a flat case wearing the nested key");
+        int[] out = new int[frames.size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = frames.get(i).getAsInt();
+        }
+        return out;
+    }
+
+    private static JsonObject byName(List<JsonObject> block, String name) {
+        return block.stream().filter(c -> nameOf(c).equals(name)).findFirst()
                 .orElseThrow(() -> new AssertionError("the block no longer carries " + name));
     }
 
