@@ -472,6 +472,22 @@ to `COMPLETE`, so the block cannot be passed by rejecting every short read — a
 `liftingTheReceiverCapsFallsBackToIncomplete` replays the rejections with the caps
 lifted to show the verdicts came from the ceiling.
 
+`BooleanTolerantTest` runs the file's fifth block, `boolean_tolerant` (CORELIB_PLAN
+§4.4). A boolean has no wire type of its own — it is an unsigned varint — and §4.4
+is *canonical on encode, tolerant on decode*: an encoder must write `true` as `1`,
+while a decoder must read **every** value other than `0` as `true`, normalize it
+away, and re-encode it as `1`. Those bytes can only come from a foreign encoder, so
+the block is hand-authored rather than replayed out of a vector's `fields`, and each
+case is decoded **and** re-encoded: the outcome alone would still pass a decoder
+that masked `256` to eight bits and answered `false`, or one that kept the raw `2`.
+This decoder has no boolean callback — the value arrives whole through
+`Visitor.unsigned` and the zero test is the receiver's, as generated code writes it
+— so the library's half is to deliver the varint undamaged on both decode surfaces,
+and to emit `0`/`1` through `writeBoolean` and the `Seq.boolsToLongs` bridge. The
+array cases are read through a `long[]`, never a narrower bulk destination: an
+`arrayBulk` destination's width *is* a bound, which is right for an integer array
+and exactly what a boolean, having no width bound, may not be read through.
+
 ### Feature flags
 
 **None** — the build always ships the full format.
