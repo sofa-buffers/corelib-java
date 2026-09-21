@@ -123,9 +123,11 @@ class ForgottenCapTest {
     }
 
     /**
-     * The schema statement is an object with no number in it, and the only way to
-     * produce a bound carrying one is the receiver factory. So the two answers do
-     * not share a representation at all — not merely different values of one.
+     * The numberless schema statement is an object with no number in it, and the
+     * only ways to produce a bound carrying one are the two named factories, each
+     * of which fixes the verdict with the number. So a receiver cap and a schema
+     * bound do not share a representation at all — not merely different values of
+     * one.
      */
     @Test
     void theSchemaStatementCarriesNoNumber() throws Exception {
@@ -145,9 +147,10 @@ class ForgottenCapTest {
             if (!Modifier.isPublic(m.getModifiers()) || !Modifier.isStatic(m.getModifiers())) {
                 continue;
             }
-            assertEquals("receiver", m.getName(),
-                    "receiver(long) is the only public factory: every other one would be a "
-                            + "second way to reach the comparison");
+            assertTrue(m.getName().equals("receiver") || m.getName().equals("schema"),
+                    "receiver(long) and schema(long) are the only public factories: any other "
+                            + "would be a way to reach the comparison without naming its verdict, "
+                            + "found " + m.getName());
         }
     }
 
@@ -172,6 +175,18 @@ class ForgottenCapTest {
                             + "InvalidArgument), not a limit to raise and not malformed bytes");
         }
         assertNotNull(receiver.invoke(null, 1L), "1 is the smallest real cap");
+
+        // The schema factory refuses the same two values: 0 is an unassigned field
+        // and a negative the retired sentinel, and the schema validator admits
+        // neither as a count or maxlen.
+        Method schema = boundClass().getMethod("schema", long.class);
+        for (long forgotten : new long[] {0L, -1L, Long.MIN_VALUE}) {
+            InvocationTargetException e = assertThrows(InvocationTargetException.class,
+                    () -> schema.invoke(null, forgotten),
+                    "Bound.schema(" + forgotten + ") must not become a bound");
+            assertInstanceOf(IllegalArgumentException.class, e.getCause());
+        }
+        assertNotNull(schema.invoke(null, 1L), "1 is the smallest schema count");
     }
 
     /**

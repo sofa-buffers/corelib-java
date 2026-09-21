@@ -267,7 +267,7 @@ is an argument, an element type is a type parameter.
 | `Seq.placeElem` | place a wrapper array's decoded `string` or `blob` at the index its id names, filling the gaps omitted interior elements left with the shared element default; a repeated id replaces (MESSAGE_SPEC §5.1 / §7.4) |
 | `Seq.reserveElem` | reserve the slot a wrapper array's `struct`, `union` or nested-array element is routed into, one fresh element per slot from a factory; a re-opened id merges into the element its earlier fields built (§7.4) |
 | `Seq.reserveRow` / `reserveRowBytes` … `reserveRowDoubles` | place a matrix row at the index its id names, filling a gap with the empty row rather than shifting every later row down (MESSAGE_SPEC §5.1 / §7.4) |
-| `Seq.checkIndex` | the element-index bound each of the three reservations above takes, on its own — for the **length word** of a `string`/`blob` element, which has no reservation to ride and must be judged before the payload (§5.2). Where the schema bounds the array this is `Bound.SCHEMA_BOUNDED` and the caller's own `INVALID` governs; where it does not, the `Bound` carries the receiver cap and the comparison happens here (§6.2.1) |
+| `Seq.checkIndex` | the element-index bound each of the three reservations above takes, on its own — for the **length word** of a `string`/`blob` element, which has no reservation to ride and must be judged before the payload (§5.2). The `Bound` carries the schema `count` where the schema declares one (`Bound.schema`, `INVALID_MSG` at `id >= count`) and the receiver cap where it does not (`Bound.receiver`, `LIMIT_EXCEEDED`); either way the comparison happens here, before anything grows (§6.2.1, §7.2 item 8) |
 | `Seq.ensureCap` (one per primitive width) | the array-growth policy: double, stop at the announced count, and never allocate from a count the wire claimed but has not delivered |
 | `Seq.ARRAY_INIT_CAP`, `Seq.EMPTY_BYTES` … `EMPTY_DOUBLES` | the bounded first reservation, and the shared zero-length arrays a field initializer points at |
 | `Seq.reset` / `Seq.orEmpty` / `Seq.boolsToLongs` | re-arm a reused destination in place; absorb a null field on the encode side; the one boxed-to-primitive conversion `bool` still needs |
@@ -275,7 +275,7 @@ is an argument, an element type is a type parameter.
 | `Utf8.decode` | validate a byte range and materialize it, in that order — the only order in which invalid UTF-8 can still be rejected (§6.4) |
 | `Sofab.invalid` | the carrier a `Visitor` rejects malformed input through, since a callback declares no checked exception; `IStream.feed` latches it as terminal like its own rejections |
 | `Sofab.limitExceeded` / `Sofab.argument` | the twin carrier for a receiver-limit refusal, which is latched as terminal too but under its own code, **never** as `INVALID`; and the carrier for a defect in the call, such as a bound the caller never stated |
-| `Bound.receiver` / `Bound.SCHEMA_BOUNDED` | which of §6.2.1's two rules bounds one field: the deployment's configured cap, or the schema's own `count`/`maxlen` |
+| `Bound.schema` / `Bound.receiver` / `Bound.SCHEMA_BOUNDED` | which of §6.2.1's two rules bounds one field, with its number and its verdict: the schema's own `count`/`maxlen` (`INVALID_MSG`), or the deployment's configured cap (`LIMIT_EXCEEDED`); `SCHEMA_BOUNDED` is the numberless statement for a payload whose `maxlen` the caller has already enforced |
 | `OStream.overScratch` / `copyOfBytesUsed` | a per-thread buffer for a one-shot `encode()`, so the worst case is allocated once per thread rather than once per call. The **size** stays with the caller (CORELIB_PLAN §5.1): generated code passes its own `MAX_SIZE` |
 
 These are ordinary public API, usable directly; they are simply shaped by what
@@ -298,6 +298,11 @@ the limit guards:
 | `max_dyn_blob_len` | `PayloadAcc.blob(…, bound)` | the same |
 | `max_dyn_array_count` | `Seq.placeElem` / `reserveElem` / `reserveRow` / `reserveRow*(…, bound)`, and `Seq.checkIndex(…, bound)` at a `string`/`blob` element's length word | the element **index**, before anything is created and before the list grows |
 
+The same array calls take the schema `count` too, as `Bound.schema(count)`, and
+compare it in the same place: a `count` is a capacity, so `id >= count` is
+`INVALID_MSG` (MESSAGE_SPEC §7.1) and never `LIMIT_EXCEEDED`. One argument per
+field, so the schema bound and the cap are never both in force.
+
 A breach is `SofabError.LIMIT_EXCEEDED` — a policy rejection of well-formed bytes,
 never clamped into a shortened value and never the `INVALID` outcome. It is
 **terminal** (§6.3): the decode ends there, and every further `feed` repeats the
@@ -306,37 +311,39 @@ that passes a cap here does not also guard in front of the call: the rule has on
 implementation.
 
 `Bound` is what each of those calls takes, and it has exactly the two answers
-§6.2.1 admits — never one number with a reserved value for the second:
+§6.2.1 admits, each carrying its own verdict — never one number with a reserved
+value for the second:
 
 ```java
 private static final Bound TAGS_CAP = Bound.receiver(MAX_DYN_ARRAY_COUNT);
+private static final Bound ROWS_COUNT = Bound.schema(8);
 
-Seq.reserveRow(rows, id, TAGS_CAP);              // schema declares no count:
-Seq.reserveRow(rows, id, Bound.SCHEMA_BOUNDED);  // count: N — checked one line above
+Seq.reserveRow(rows, id, TAGS_CAP);    // schema declares no count: LIMIT_EXCEEDED at the cap
+Seq.reserveRow(rows, id, ROWS_COUNT);  // count: 8 — INVALID_MSG at id 8 and above
 ```
 
 `Bound.receiver(n)` is the deployment's configured number for a schema-unbounded
-field. `Bound.SCHEMA_BOUNDED` states that the schema's `maxlen`/`count` governs
-instead (a breach there is the caller's `Sofab.invalid`, `INVALID_MSG`) — it carries
-no number, because this library does not apply the schema bound and a second copy of
-that rule here is what §6.2.1's *one implementation* forbids.
+field. `Bound.schema(n)` is the schema's `count` (or `maxlen`), compared by the same
+call. `Bound.SCHEMA_BOUNDED` is the numberless statement for a `string`/`blob`
+whose `maxlen` the caller has already enforced at its length word, so `PayloadAcc`
+compares nothing; it cannot bound an array index, and every `Seq` reservation
+refuses it as `SofabError.ARGUMENT`.
 
 **A cap that was never stated is reported, not obeyed.** §6.2.1 admits "no unset
 state and no unlimited mode" and forbids reading an omitted argument as *unlimited*,
 so there is no numeric value that means "the schema bounds this" and nothing to
-default to: `Bound.receiver` refuses `0` (Java's unassigned field) and every
-negative (the sentinel this shape replaced), and a `null` bound is
+default to: `Bound.receiver` and `Bound.schema` refuse `0` (Java's unassigned field)
+and every negative (the sentinel this shape replaced), and a `null` bound is
 `SofabError.ARGUMENT` — a defect in the **call**, not `LIMIT_EXCEEDED`, which would
 promise a limit to raise that was never configured (§6.3). `ARRAY_MAX` is a format
 ceiling and is not available as a fallback either.
 
 Build each `Bound` once, into a `static final`: they are constants of the
-deployment, so nothing is allocated per call or per message.
+deployment or the schema, so nothing is allocated per call or per message.
 
 Two checks stay in generated code, because no call into this library carries them:
 a **native array count** (`new int[count]` is written straight into the field) and
-the element **index of a flat wrapper array** of strings, blobs or sub-messages
-(placed by an inline `while (list.size() <= id)`).
+a matrix **row's own element count**.
 
 ## Memory handling
 

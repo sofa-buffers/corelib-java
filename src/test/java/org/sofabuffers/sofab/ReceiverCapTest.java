@@ -319,12 +319,18 @@ class ReceiverCapTest {
         assertEquals(1, rows.size(), "the refused row was neither appended nor moved down");
     }
 
-    /** As for a payload, the schema-bounded sentinel compares nothing here. */
+    /**
+     * {@link Bound#SCHEMA_BOUNDED} carries no count, so it cannot bound a row index:
+     * the reservation refuses it as a defect in the call rather than growing the
+     * list uncompared. The schema {@code count} travels as {@link Bound#schema(long)}
+     * (see {@link SchemaBoundTest}).
+     */
     @Test
-    void aSchemaBoundedRowIndexIsTheCallersToCheck() {
+    void aNumberlessSchemaStatementCannotBoundARowIndex() {
         List<int[]> rows = new ArrayList<>();
-        Seq.reserveRowInts(rows, 40, 1, Bound.SCHEMA_BOUNDED);
-        assertEquals(41, rows.size());
+        assertEquals(SofabError.ARGUMENT, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> Seq.reserveRowInts(rows, 40, 1, Bound.SCHEMA_BOUNDED))));
+        assertEquals(0, rows.size(), "refused, so nothing was reserved or grown");
     }
 
     /**
@@ -383,16 +389,18 @@ class ReceiverCapTest {
         assertEquals(List.of("a", "b"), out, "a lower id delivered afterwards still lands");
     }
 
-    /** As for a row, the schema-bounded statement compares nothing here. */
+    /** As for a row, the numberless schema statement bounds no element index. */
     @Test
-    void aSchemaBoundedElementIndexIsTheCallersToCheck() {
+    void aNumberlessSchemaStatementCannotBoundAnElementIndex() {
         List<String> out = new ArrayList<>();
-        Seq.placeElem(out, 40, "", "far", Bound.SCHEMA_BOUNDED);
-        assertEquals(41, out.size());
+        assertEquals(SofabError.ARGUMENT, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> Seq.placeElem(out, 0, "", "near", Bound.SCHEMA_BOUNDED))));
+        assertEquals(0, out.size());
 
         List<Object> framed = new ArrayList<>();
-        Seq.reserveElem(framed, 40, Object::new, Bound.SCHEMA_BOUNDED);
-        assertEquals(41, framed.size());
+        assertEquals(SofabError.ARGUMENT, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> Seq.reserveElem(framed, 0, Object::new, Bound.SCHEMA_BOUNDED))));
+        assertEquals(0, framed.size());
     }
 
     /**
@@ -406,7 +414,8 @@ class ReceiverCapTest {
         assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(assertThrows(UncheckedIOException.class,
                 () -> Seq.checkIndex(4, Bound.receiver(4)))));
         Seq.checkIndex(3, Bound.receiver(4));
-        Seq.checkIndex(40, Bound.SCHEMA_BOUNDED);
+        assertEquals(SofabError.ARGUMENT, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> Seq.checkIndex(0, Bound.SCHEMA_BOUNDED))));
         assertEquals(SofabError.ARGUMENT, categoryOf(assertThrows(UncheckedIOException.class,
                 () -> Seq.checkIndex(0, null))));
     }

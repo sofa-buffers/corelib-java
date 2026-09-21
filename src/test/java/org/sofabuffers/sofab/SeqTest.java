@@ -33,6 +33,13 @@ import org.junit.jupiter.api.Test;
  */
 class SeqTest {
 
+    /**
+     * The schema {@code count} every placement below is bounded by: above every
+     * index these tests place, so what they pin is placement, not the bound
+     * ({@link SchemaBoundTest} pins the bound itself).
+     */
+    private static final Bound COUNT_8 = Bound.schema(8);
+
     // --- growth: capacity edges ---------------------------------------------
 
     /** Below the length it already has, the array is handed straight back. */
@@ -155,7 +162,7 @@ class SeqTest {
     @Test
     void aWrapperRowGapFillsRatherThanShifts() {
         List<List<String>> rows = new ArrayList<>();
-        Seq.reserveRow(rows, 2, Bound.SCHEMA_BOUNDED);
+        Seq.reserveRow(rows, 2, COUNT_8);
         rows.get(2).add("third");
 
         assertEquals(3, rows.size());
@@ -171,11 +178,11 @@ class SeqTest {
     @Test
     void aRepeatedWrapperRowIsEmptiedInPlace() {
         List<List<String>> rows = new ArrayList<>();
-        Seq.reserveRow(rows, 0, Bound.SCHEMA_BOUNDED);
+        Seq.reserveRow(rows, 0, COUNT_8);
         List<String> first = rows.get(0);
         first.add("stale");
 
-        Seq.reserveRow(rows, 0, Bound.SCHEMA_BOUNDED);
+        Seq.reserveRow(rows, 0, COUNT_8);
         assertSame(first, rows.get(0), "the row object is reused");
         assertEquals(List.of(), rows.get(0), "its value is replaced, not merged into");
         assertEquals(1, rows.size());
@@ -186,7 +193,7 @@ class SeqTest {
     void aNullWrapperRowIsMaterialized() {
         List<List<String>> rows = new ArrayList<>();
         rows.add(null);
-        Seq.reserveRow(rows, 0, Bound.SCHEMA_BOUNDED);
+        Seq.reserveRow(rows, 0, COUNT_8);
         assertEquals(List.of(), rows.get(0));
     }
 
@@ -194,7 +201,7 @@ class SeqTest {
     @Test
     void aPrimitiveRowGapFillsWithTheSharedEmptyRow() {
         List<int[]> rows = new ArrayList<>();
-        int[] row = Seq.reserveRowInts(rows, 2, 3, Bound.SCHEMA_BOUNDED);
+        int[] row = Seq.reserveRowInts(rows, 2, 3, COUNT_8);
 
         assertEquals(3, rows.size());
         assertSame(Seq.EMPTY_INTS, rows.get(0), "a gap costs no allocation");
@@ -207,9 +214,9 @@ class SeqTest {
     @Test
     void aRepeatedPrimitiveRowIsReplaced() {
         List<int[]> rows = new ArrayList<>();
-        int[] first = Seq.reserveRowInts(rows, 0, 2, Bound.SCHEMA_BOUNDED);
+        int[] first = Seq.reserveRowInts(rows, 0, 2, COUNT_8);
         first[0] = 9;
-        int[] second = Seq.reserveRowInts(rows, 0, 2, Bound.SCHEMA_BOUNDED);
+        int[] second = Seq.reserveRowInts(rows, 0, 2, COUNT_8);
 
         assertNotSame(first, second);
         assertSame(second, rows.get(0));
@@ -224,42 +231,42 @@ class SeqTest {
     @Test
     void everyPrimitiveRowWidthPlacesAlike() {
         List<byte[]> bytes = new ArrayList<>();
-        assertEquals(2, Seq.reserveRowBytes(bytes, 1, 2, Bound.SCHEMA_BOUNDED).length);
+        assertEquals(2, Seq.reserveRowBytes(bytes, 1, 2, COUNT_8).length);
         assertSame(Seq.EMPTY_BYTES, bytes.get(0));
-        assertSame(Seq.reserveRowBytes(bytes, 1, 3, Bound.SCHEMA_BOUNDED), bytes.get(1));
+        assertSame(Seq.reserveRowBytes(bytes, 1, 3, COUNT_8), bytes.get(1));
 
         List<short[]> shorts = new ArrayList<>();
-        assertEquals(2, Seq.reserveRowShorts(shorts, 1, 2, Bound.SCHEMA_BOUNDED).length);
+        assertEquals(2, Seq.reserveRowShorts(shorts, 1, 2, COUNT_8).length);
         assertSame(Seq.EMPTY_SHORTS, shorts.get(0));
-        assertSame(Seq.reserveRowShorts(shorts, 1, 3, Bound.SCHEMA_BOUNDED), shorts.get(1));
+        assertSame(Seq.reserveRowShorts(shorts, 1, 3, COUNT_8), shorts.get(1));
 
         List<long[]> longs = new ArrayList<>();
-        assertEquals(2, Seq.reserveRowLongs(longs, 1, 2, Bound.SCHEMA_BOUNDED).length);
+        assertEquals(2, Seq.reserveRowLongs(longs, 1, 2, COUNT_8).length);
         assertSame(Seq.EMPTY_LONGS, longs.get(0));
-        assertSame(Seq.reserveRowLongs(longs, 1, 3, Bound.SCHEMA_BOUNDED), longs.get(1));
+        assertSame(Seq.reserveRowLongs(longs, 1, 3, COUNT_8), longs.get(1));
 
         List<float[]> floats = new ArrayList<>();
-        assertEquals(2, Seq.reserveRowFloats(floats, 1, 2, Bound.SCHEMA_BOUNDED).length);
+        assertEquals(2, Seq.reserveRowFloats(floats, 1, 2, COUNT_8).length);
         assertSame(Seq.EMPTY_FLOATS, floats.get(0));
-        assertSame(Seq.reserveRowFloats(floats, 1, 3, Bound.SCHEMA_BOUNDED), floats.get(1));
+        assertSame(Seq.reserveRowFloats(floats, 1, 3, COUNT_8), floats.get(1));
 
         List<double[]> doubles = new ArrayList<>();
-        assertEquals(2, Seq.reserveRowDoubles(doubles, 1, 2, Bound.SCHEMA_BOUNDED).length);
+        assertEquals(2, Seq.reserveRowDoubles(doubles, 1, 2, COUNT_8).length);
         assertSame(Seq.EMPTY_DOUBLES, doubles.get(0));
-        assertSame(Seq.reserveRowDoubles(doubles, 1, 3, Bound.SCHEMA_BOUNDED), doubles.get(1));
+        assertSame(Seq.reserveRowDoubles(doubles, 1, 3, COUNT_8), doubles.get(1));
     }
 
     /** A row reserved at the very next index appends rather than growing a gap. */
     @Test
     void aRowAtTheNextIndexAppends() {
         List<int[]> rows = new ArrayList<>();
-        Seq.reserveRowInts(rows, 0, 1, Bound.SCHEMA_BOUNDED);
-        Seq.reserveRowInts(rows, 1, 1, Bound.SCHEMA_BOUNDED);
+        Seq.reserveRowInts(rows, 0, 1, COUNT_8);
+        Seq.reserveRowInts(rows, 1, 1, COUNT_8);
         assertEquals(2, rows.size());
 
         List<List<String>> wrappers = new ArrayList<>();
-        Seq.reserveRow(wrappers, 0, Bound.SCHEMA_BOUNDED);
-        Seq.reserveRow(wrappers, 1, Bound.SCHEMA_BOUNDED);
+        Seq.reserveRow(wrappers, 0, COUNT_8);
+        Seq.reserveRow(wrappers, 1, COUNT_8);
         assertEquals(2, wrappers.size());
     }
 
@@ -274,8 +281,8 @@ class SeqTest {
     @Test
     void aLeafElementGapFillsRatherThanShifts() {
         List<String> out = new ArrayList<>();
-        Seq.placeElem(out, 0, "", "first", Bound.SCHEMA_BOUNDED);
-        Seq.placeElem(out, 2, "", "third", Bound.SCHEMA_BOUNDED);
+        Seq.placeElem(out, 0, "", "first", COUNT_8);
+        Seq.placeElem(out, 2, "", "third", COUNT_8);
 
         assertEquals(List.of("first", "", "third"), out);
     }
@@ -287,7 +294,7 @@ class SeqTest {
     @Test
     void aLeafElementAloneAtAHighIdSetsTheLength() {
         List<String> out = new ArrayList<>();
-        Seq.placeElem(out, 3, "", "last", Bound.SCHEMA_BOUNDED);
+        Seq.placeElem(out, 3, "", "last", COUNT_8);
 
         assertEquals(4, out.size());
         assertEquals(List.of("", "", "", "last"), out);
@@ -297,8 +304,8 @@ class SeqTest {
     @Test
     void aRepeatedLeafElementIdReplaces() {
         List<String> out = new ArrayList<>();
-        Seq.placeElem(out, 1, "", "stale", Bound.SCHEMA_BOUNDED);
-        Seq.placeElem(out, 1, "", "fresh", Bound.SCHEMA_BOUNDED);
+        Seq.placeElem(out, 1, "", "stale", COUNT_8);
+        Seq.placeElem(out, 1, "", "fresh", COUNT_8);
 
         assertEquals(List.of("", "fresh"), out);
     }
@@ -307,8 +314,8 @@ class SeqTest {
     @Test
     void aLeafElementAtTheNextIndexAppends() {
         List<String> out = new ArrayList<>();
-        Seq.placeElem(out, 0, "", "a", Bound.SCHEMA_BOUNDED);
-        Seq.placeElem(out, 1, "", "b", Bound.SCHEMA_BOUNDED);
+        Seq.placeElem(out, 0, "", "a", COUNT_8);
+        Seq.placeElem(out, 1, "", "b", COUNT_8);
 
         assertEquals(List.of("a", "b"), out);
     }
@@ -321,7 +328,7 @@ class SeqTest {
     @Test
     void aLeafGapCostsNoAllocation() {
         List<byte[]> out = new ArrayList<>();
-        Seq.placeElem(out, 2, Seq.EMPTY_BYTES, new byte[] { 7 }, Bound.SCHEMA_BOUNDED);
+        Seq.placeElem(out, 2, Seq.EMPTY_BYTES, new byte[] { 7 }, COUNT_8);
 
         assertEquals(3, out.size());
         assertSame(Seq.EMPTY_BYTES, out.get(0));
@@ -338,8 +345,8 @@ class SeqTest {
     void oneBodyPlacesEveryLeafElementType() {
         List<String> strings = new ArrayList<>();
         List<byte[]> blobs = new ArrayList<>();
-        Seq.placeElem(strings, 1, "", "s", Bound.SCHEMA_BOUNDED);
-        Seq.placeElem(blobs, 1, Seq.EMPTY_BYTES, new byte[] { 1 }, Bound.SCHEMA_BOUNDED);
+        Seq.placeElem(strings, 1, "", "s", COUNT_8);
+        Seq.placeElem(blobs, 1, Seq.EMPTY_BYTES, new byte[] { 1 }, COUNT_8);
 
         assertEquals(List.of("", "s"), strings);
         assertEquals(2, blobs.size());
@@ -357,7 +364,7 @@ class SeqTest {
     @Test
     void everyFramedSlotGetsItsOwnElement() {
         List<Elem> out = new ArrayList<>();
-        Seq.reserveElem(out, 2, Elem::new, Bound.SCHEMA_BOUNDED);
+        Seq.reserveElem(out, 2, Elem::new, COUNT_8);
 
         assertEquals(3, out.size());
         assertNotSame(out.get(0), out.get(1));
@@ -375,11 +382,11 @@ class SeqTest {
     @Test
     void aRepeatedFramedElementIdMergesIntoTheSameObject() {
         List<Elem> out = new ArrayList<>();
-        Seq.reserveElem(out, 0, Elem::new, Bound.SCHEMA_BOUNDED);
+        Seq.reserveElem(out, 0, Elem::new, COUNT_8);
         Elem first = out.get(0);
         first.a = 3;
 
-        Seq.reserveElem(out, 0, Elem::new, Bound.SCHEMA_BOUNDED);
+        Seq.reserveElem(out, 0, Elem::new, COUNT_8);
         assertSame(first, out.get(0), "the element is merged into, not started again");
         assertEquals(3, out.get(0).a);
         assertEquals(1, out.size());
@@ -393,13 +400,13 @@ class SeqTest {
         Seq.reserveElem(out, 2, () -> {
             made[0]++;
             return new Elem();
-        }, Bound.SCHEMA_BOUNDED);
+        }, COUNT_8);
         assertEquals(3, made[0], "the slot and the two gaps below it");
 
         Seq.reserveElem(out, 0, () -> {
             made[0]++;
             return new Elem();
-        }, Bound.SCHEMA_BOUNDED);
+        }, COUNT_8);
         assertEquals(3, made[0], "id 0 already had a slot");
         assertEquals(3, out.size());
     }
@@ -412,7 +419,7 @@ class SeqTest {
     @Test
     void aFramedGapIsADefaultElementAndNotNull() {
         List<Elem> out = new ArrayList<>();
-        Seq.reserveElem(out, 1, Elem::new, Bound.SCHEMA_BOUNDED);
+        Seq.reserveElem(out, 1, Elem::new, COUNT_8);
 
         assertNotNull(out.get(0));
         assertEquals(0, out.get(0).a);
