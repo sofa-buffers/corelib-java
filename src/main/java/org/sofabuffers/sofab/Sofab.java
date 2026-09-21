@@ -154,7 +154,8 @@ public final class Sofab {
      * bytes and not in the deployment.
      *
      * <p>Raised where a {@link Bound} the caller had to state is missing — a
-     * {@code null} where a receiver cap or {@link Bound#SCHEMA_BOUNDED} belonged.
+     * {@code null} where a bound belonged, or the numberless
+     * {@link Bound#SCHEMA_BOUNDED} handed to a call that bounds an array index.
      * §6.2.1 forbids reading an omitted argument as <em>unlimited</em>, so an
      * omission is reported rather than obeyed.
      *

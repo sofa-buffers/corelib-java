@@ -75,7 +75,9 @@ import java.util.Arrays;
  * {@code maxlen} governs instead — a distinct value carrying no number, so a caller
  * that forgot to configure a cap cannot arrive here spelling the same thing a
  * schema-bounded field spells. A missing bound is {@link Sofab#argument}, never
- * silently uncapped.
+ * silently uncapped. A caller may instead hand the {@code maxlen} itself over as
+ * {@link Bound#schema(long)}; it is then compared here like a cap, but a breach is
+ * {@code INVALID_MSG} (MESSAGE_SPEC §7.1), never {@code LIMIT_EXCEEDED}.
  *
  * <p><b>The number is the caller's.</b> §6.2.1 fixes the provenance of a receiver
  * limit — it comes from generated code, which knows the schema and the target —
@@ -227,7 +229,7 @@ public final class PayloadAcc {
      */
     public static void checkStringLength(int total, Bound bound) {
         if (Bound.required(bound, "max_dyn_string_len").exceededBy(total)) {
-            throw overCap("string length", total, bound);
+            throw bound.rejectLength("string length", total);
         }
     }
 
@@ -246,21 +248,8 @@ public final class PayloadAcc {
      */
     public static void checkBlobLength(int total, Bound bound) {
         if (Bound.required(bound, "max_dyn_blob_len").exceededBy(total)) {
-            throw overCap("blob length", total, bound);
+            throw bound.rejectLength("blob length", total);
         }
-    }
-
-    /**
-     * Build the {@link SofabError#LIMIT_EXCEEDED} rejection, out of line so the
-     * comparison that guards it stays two instructions on the decode path.
-     *
-     * <p>The detail names the announced length and the limit it broke, which is
-     * what a receiver acts on: raise the limit, or the sender sends less. It does
-     * not name the field — this class is handed a payload, not a schema — so a
-     * caller wanting the field in the message catches and re-raises.
-     */
-    private static java.io.UncheckedIOException overCap(String noun, int total, Bound bound) {
-        return Sofab.limitExceeded(noun + " " + total + " above configured limit " + bound.cap());
     }
 
     /**

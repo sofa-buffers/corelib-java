@@ -46,14 +46,15 @@ import org.junit.jupiter.params.provider.MethodSource;
  * asserts {@code expect}: container length and outcome only, no allocator
  * instrumentation, which is what makes the cases portable across the family.
  *
- * <p><b>What this port owns.</b> The struct cases run through {@link Seq#reserveRow},
- * the library's own wrapper-array placement: it compares the element index against
- * the {@link Bound} it is handed (§6.2.1), fills a gap with the empty row rather than
- * shifting later rows down, and replaces rather than merges. A struct element here is
- * a framed sub-sequence carrying one unsigned field, which is exactly a row holding
- * one value. The string cases have no such helper — a {@code List<String>} destination
- * is placed by generated code — so that path uses the library's cap comparison through
- * {@link Bound} and states the gap fill itself, standing in for the generated layer.
+ * <p><b>What this port owns.</b> Both element kinds run through the library's own
+ * wrapper-array placement, exactly as generated code calls it, so the cases exercise
+ * the real helpers rather than a copy of them. A string element is bounded at its
+ * length word by {@link Seq#checkIndex} and placed, once its payload is whole, by
+ * {@link Seq#placeElem}; a struct element — a framed sub-sequence carrying one
+ * unsigned field — gets its slot from {@link Seq#reserveElem}. Each compares the
+ * element index against the {@link Bound} it is handed (§6.2.1) before it grows the
+ * list, and fills a gap with the element default rather than shifting later
+ * elements down.
  */
 class SequenceGrowthTest {
 
@@ -162,10 +163,10 @@ class SequenceGrowthTest {
     // --- the destination, standing in for the generated layer ---------------------
 
     /**
-     * The wrapper-array destination. The struct path goes through
-     * {@link Seq#reserveRow}, which is the library's placement and its cap comparison;
-     * the string path states the same contract for a {@code List<String>}, which has
-     * no helper here.
+     * The wrapper-array destination, standing in for a generated message: the struct
+     * path reserves its slot through {@link Seq#reserveElem}, the string path bounds
+     * the index through {@link Seq#checkIndex} at the first piece and places the
+     * value through {@link Seq#placeElem} — the calls generated code makes.
      *
      * <p>The order matters and is what the growth/reject case is about: §6.2.1 bounds
      * the index <em>before</em> the container it indexes into is extended, so a
@@ -175,7 +176,7 @@ class SequenceGrowthTest {
         private final boolean structElements;
         private final Bound bound = Bound.receiver(CAP);
         private final List<String> strings = new ArrayList<>();
-        private final List<List<Long>> rows = new ArrayList<>();
+        private final List<List<Long>> structs = new ArrayList<>();
         private int depth;
         private int element = -1;
         private byte[] payload = Seq.EMPTY_BYTES;
@@ -194,16 +195,21 @@ class SequenceGrowthTest {
          * it indexes into is extended" forbids.
          */
         int length() {
-            return structElements ? rows.size() : strings.size();
+            return structElements ? structs.size() : strings.size();
         }
 
         String stringAt(int i) {
             return i < strings.size() ? strings.get(i) : "";
         }
 
+        /**
+         * The element's one field, or its default. A re-opened element merges
+         * into the slot {@link Seq#reserveElem} kept, so the last value written to
+         * the field is its value (MESSAGE_SPEC §7.4).
+         */
         long numberAt(int i) {
-            List<Long> row = i < rows.size() ? rows.get(i) : null;
-            return row == null || row.isEmpty() ? 0L : row.get(0);
+            List<Long> fields = i < structs.size() ? structs.get(i) : null;
+            return fields == null || fields.isEmpty() ? 0L : fields.get(fields.size() - 1);
         }
 
         @Override
@@ -211,9 +217,10 @@ class SequenceGrowthTest {
             depth++;
             // depth 1 is the wrapper itself; depth 2 is a struct element.
             if (depth == 2 && structElements) {
-                // The library's own placement: bounds the index against the cap,
-                // gap-fills with the empty row, and never shifts later rows down.
-                Seq.reserveRow(rows, id, bound);
+                // The library's own framed-element reservation: bounds the index
+                // against the cap, gap-fills with fresh elements, and never shifts
+                // later elements down.
+                Seq.reserveElem(structs, id, ArrayList::new, bound);
                 element = id;
             }
         }
@@ -229,7 +236,7 @@ class SequenceGrowthTest {
         @Override
         public void unsigned(int id, long value) {
             if (depth == 2 && structElements && element >= 0 && id == 0) {
-                rows.get(element).add(value);
+                structs.get(element).add(value);
             }
         }
 
@@ -240,23 +247,17 @@ class SequenceGrowthTest {
                 return;
             }
             // The index is bounded at the FIRST piece, before any payload is kept: a
-            // rejection must not depend on the payload arriving whole.
+            // rejection must not depend on the payload arriving whole. Generated code
+            // makes this same call from fixlenBegin, at the length word.
             if (offset == 0) {
-                if (bound.exceededByIndex(id)) {
-                    throw Sofab.limitExceeded(
-                            "array element index " + id + " above configured limit " + CAP);
-                }
-                // MESSAGE_SPEC §5.1: every destination slot is initialised to its
-                // ELEMENT DEFAULT before the array is applied — "" for a string, not
-                // null. Only a gap case ever looks at a slot nothing was written to.
-                while (strings.size() <= id) {
-                    strings.add("");
-                }
+                Seq.checkIndex(id, bound);
                 payload = new byte[total];
             }
             System.arraycopy(data, chunkOffset, payload, offset, chunkLength);
             if (offset + chunkLength == total) {
-                strings.set(id, new String(payload, StandardCharsets.UTF_8));
+                // MESSAGE_SPEC §5.1: a gap below id holds the ELEMENT DEFAULT — ""
+                // for a string, not null — which placeElem fills in.
+                Seq.placeElem(strings, id, "", new String(payload, StandardCharsets.UTF_8), bound);
             }
         }
     }
