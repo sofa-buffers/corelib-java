@@ -55,6 +55,7 @@ class ForgottenCapTest {
     /** The calls that compare a receiver cap; each must take the bound as a type. */
     private static final List<String> CAP_TAKING_METHODS = List.of(
             "PayloadAcc.string", "PayloadAcc.blob",
+            "Seq.placeElem", "Seq.reserveElem", "Seq.checkIndex",
             "Seq.reserveRow", "Seq.reserveRowBytes", "Seq.reserveRowShorts",
             "Seq.reserveRowInts", "Seq.reserveRowLongs", "Seq.reserveRowFloats",
             "Seq.reserveRowDoubles");
@@ -202,6 +203,20 @@ class ForgottenCapTest {
         assertEquals(SofabError.ARGUMENT, categoryOf(
                 () -> call(Seq.class, "reserveRow", null, wrapper, 3, null)));
         assertEquals(0, wrapper.size());
+
+        List<String> leaves = new ArrayList<>();
+        assertEquals(SofabError.ARGUMENT, categoryOf(
+                () -> call(Seq.class, "placeElem", null, leaves, 3, "", "v", null)));
+        assertEquals(0, leaves.size(), "refused before anything was placed or grown");
+
+        List<Object> framed = new ArrayList<>();
+        assertEquals(SofabError.ARGUMENT, categoryOf(
+                () -> call(Seq.class, "reserveElem", null, framed, 3,
+                        (java.util.function.Supplier<Object>) Object::new, null)));
+        assertEquals(0, framed.size());
+
+        assertEquals(SofabError.ARGUMENT, categoryOf(
+                () -> call(Seq.class, "checkIndex", null, 3, null)));
     }
 
     /**
