@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * Element placement and array growth for generated decode destinations — the
@@ -29,6 +30,16 @@ import java.util.List;
  * a list, because a wrapper array of strings, blobs or sub-messages has no
  * primitive form.
  *
+ * <p><b>Three reservations, one shape.</b> Every wrapper array a schema can
+ * declare reaches this class through one of three calls, which differ only in what
+ * a slot holds: {@link #placeElem} puts a decoded {@code string} or {@code blob} at
+ * the index its id names; {@link #reserveElem} makes the slot a {@code struct},
+ * {@code union} or nested-array element will be routed into; {@link #reserveRow}
+ * and its six primitive overloads reserve a matrix row. The schema dependence of
+ * all three is exactly a bound, an element type and an element default — an
+ * argument, a type parameter and an argument — which is the whole of why they fit
+ * here at all.
+ *
  * <p>Two rules run through all of it. <b>Ids are positions</b> (MESSAGE_SPEC §5.1):
  * an array element's id <em>is</em> its index, an interior element equal to the
  * element default may be omitted, and the highest id present is what gives the
@@ -38,16 +49,25 @@ import java.util.List;
  * follow, bounded by nothing until a schema {@code count} or a receiver limit
  * bounds it, so no method here allocates from a count alone.
  *
- * <p><b>Receiver caps (CORELIB_PLAN §6.2.1).</b> The row reservations —
- * {@link #reserveRow} and the six primitive {@code reserveRow*} overloads — take
- * a {@link Bound} on the outer array's element <b>index</b> and compare it here, before
- * the row is created and before the outer list is grown to hold it. A wrapper
- * array announces no count, so the index is what a cap can bind: its length is
- * highest present id + 1 (MESSAGE_SPEC §5.1), and two elements at id 0 and id
- * 65535 are a 65536-slot list. §6.2.1 permits exactly this placement — "a corelib
- * MAY take a limit as an argument and perform the check itself, and a port that
- * does is conformant" — and the rule then has <b>one</b> implementation: a caller
- * that passes the cap does not also guard in front of the call.
+ * <p><b>Receiver caps (CORELIB_PLAN §6.2.1).</b> Every reservation here —
+ * {@link #placeElem}, {@link #reserveElem}, {@link #reserveRow} and the six
+ * primitive {@code reserveRow*} overloads — takes a {@link Bound} on the array's
+ * element <b>index</b> and compares it here, before anything is created and before
+ * the list is grown to hold it. A wrapper array announces no count, so the index is
+ * what a cap can bind: its length is highest present id + 1 (MESSAGE_SPEC §5.1),
+ * and two elements at id 0 and id 65535 are a 65536-slot list. §6.2.1 permits
+ * exactly this placement — "a corelib MAY take a limit as an argument and perform
+ * the check itself, and a port that does is conformant" — and the rule then has
+ * <b>one</b> implementation: a caller that passes the cap does not also guard in
+ * front of the call.
+ *
+ * <p>{@link #checkIndex} is that comparison on its own, published for the one site
+ * that has no reservation to ride: a generated {@code fixlenBegin} arm bounds a
+ * {@code string} or {@code blob} element's index at the <b>length word</b>, so that
+ * a message ending right there is still refused rather than reported
+ * {@code INCOMPLETE} (MESSAGE_SPEC §5.2). The placement that follows re-runs it,
+ * which costs one comparison against a folded constant and spares the two sites
+ * from having to agree by inspection.
  *
  * <p><b>Nothing here holds a limit.</b> The number is the caller's, used for that
  * one comparison and not retained; there is no default, no fallback and no
@@ -63,9 +83,16 @@ import java.util.List;
  * than an uncapped index. §6.2.1: "no unset state and no unlimited mode", and a
  * codec "MUST NOT read an omitted argument as unlimited".
  *
- * <p><b>What the caps here do not cover.</b> The cap on a row's own element
- * <b>count</b>, and on the count of a top-level native array, is not one of these
- * arguments: {@code n} below is a length the caller has already bounded, and the
+ * <p><b>What the caps here do not cover.</b> A {@code string} or {@code blob}
+ * element's own {@code maxlen} is not one of these arguments: the payload arrives
+ * through the visitor's own callback, and its length must be decided at the
+ * <b>length word</b> so that a message truncated right after that word is refused
+ * rather than {@code INCOMPLETE} (MESSAGE_SPEC §5.2). There is no reservation here
+ * for it to ride — {@link PayloadAcc#checkStringLength} and
+ * {@link PayloadAcc#string} own that half.
+ *
+ * <p>The cap on a row's own element <b>count</b>, and on the count of a top-level
+ * native array, is not one of these arguments: {@code n} below is a length the caller has already bounded, and the
  * two numbers can be governed by different rules — an inner array the schema
  * bounds inside an outer one it does not. A native array count also has no call
  * into this class at all; generated code writes {@code new int[count]} straight
@@ -109,6 +136,115 @@ public final class Seq {
 
     /** The shared empty {@code double[]}; see {@link #EMPTY_BYTES}. */
     public static final double[] EMPTY_DOUBLES = {};
+
+    /**
+     * <b>Place a leaf element</b> — a wrapper array's {@code string} or
+     * {@code blob} — at the index its wire id names, growing the list and filling
+     * the gaps that omitted interior elements left (MESSAGE_SPEC §5.1, §2).
+     *
+     * <p>Three rules of §5.1 sit in this one loop, and not one of them is visible
+     * in the bytes: two implementations can disagree about every one and still emit
+     * an identical message, which is why they are written here once instead of
+     * being re-emitted per schema (CORELIB_PLAN §7.2 item 8 asks for them
+     * separately for the same reason).
+     *
+     * <ul>
+     *   <li>A missing id <b>fills a gap</b> with {@code def} rather than shifting
+     *       every later element down by one — an interior element equal to the
+     *       element default is omitted by a conformant encoder (§2).
+     *   <li>The array's length is <b>highest present id + 1</b>, so growing to
+     *       {@code id + 1} per element is exactly right and no trailing fill is
+     *       ever needed: the last element is never elided.
+     *   <li>A repeated id <b>replaces</b> rather than appends (§7.4), which
+     *       {@code set} does by construction and an {@code add} could not.
+     * </ul>
+     *
+     * <p><b>The index is bounded before the list grows</b> (§7.2 item 8), so a
+     * refused id leaves the list exactly as it was and a lower id delivered
+     * afterwards still lands at its own index. Where the schema declares a
+     * {@code count} the caller has already rejected a breach as {@code INVALID}
+     * (MESSAGE_SPEC §7.1) and passes {@link Bound#SCHEMA_BOUNDED}; where it
+     * declares none, {@code bound} carries the receiver cap, the comparison happens
+     * here and a breach is {@code LIMIT_EXCEEDED}. Never both (§6.2.1).
+     *
+     * <p><b>{@code def} is shared, not copied.</b> The gap value of an array of
+     * strings or blobs is {@code ""} or {@link #EMPTY_BYTES} — immutable, or
+     * zero-length and so with no state to share — so a gap costs no allocation. An
+     * element whose default is a <em>mutable</em> object belongs in
+     * {@link #reserveElem} instead, which makes one per slot.
+     *
+     * @param out   the destination list, which this grows
+     * @param id    the element's wire id, which is its index
+     * @param def   the element default, filling any gap below {@code id}
+     * @param value the decoded element
+     * @param bound {@link Bound#receiver(long)} carrying the caller's
+     *              {@code max_dyn_array_count} (§6.2.1), or
+     *              {@link Bound#SCHEMA_BOUNDED} where the schema bounds the array
+     * @param <T>   element type
+     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
+     *                                      {@link SofabException} when {@code id}
+     *                                      is at or past the receiver cap, or an
+     *                                      {@code ARGUMENT} one when {@code bound}
+     *                                      is null
+     */
+    public static <T> void placeElem(List<T> out, int id, T def, T value, Bound bound) {
+        checkIndex(id, bound);
+        while (out.size() <= id) {
+            out.add(def);
+        }
+        out.set(id, value);
+    }
+
+    /**
+     * <b>Reserve a framed element</b> — the slot a wrapper array's {@code struct},
+     * {@code union} or nested-array element is routed into: bound the index, then
+     * grow the list to {@code id + 1}, giving each new slot its own element from
+     * {@code make} (MESSAGE_SPEC §5.1, §2).
+     *
+     * <p>The same three rules as {@link #placeElem} and the same ordering — the
+     * index is decided before the list grows (§7.2 item 8) — with one deliberate
+     * difference: <b>a slot already present is left alone</b>. A framed element's
+     * fields arrive one at a time and each is routed into the object this call
+     * reserved, so a re-opened element id must <em>merge</em> into what its earlier
+     * fields built rather than start the element again (§7.4); replacing the slot
+     * would discard them. That is also why nothing is returned: generated code parks
+     * {@code id} in its own element-index register and reaches the element through
+     * {@code out.get(...)} on the field arms that follow.
+     *
+     * <p><b>A factory, not a shared default.</b> A struct, union or nested row is
+     * mutable and reachable by the caller, and an arriving element decodes
+     * <em>into</em> the object placed here, so one shared instance would alias every
+     * element of the array onto it — the single reason this is a second method
+     * rather than {@link #placeElem} with one more argument. {@code make} is a
+     * generated method reference ({@code SomeElem::new}): it names a generated type,
+     * which is the schema dependence a type parameter is allowed to carry, and javac
+     * lowers a non-capturing one to a constant, so the argument allocates nothing
+     * per call.
+     *
+     * <p>What this does <b>not</b> own is the <b>routing</b> — binding the element
+     * index, switching into the element's scope, emptying a re-opened nested row.
+     * That has a different shape per schema and stays generated. This owns growth
+     * and the bound, and stops at the slot.
+     *
+     * @param out   the destination list, which this grows
+     * @param id    the element's wire id, which is its index
+     * @param make  the element factory, called once per slot this creates
+     * @param bound {@link Bound#receiver(long)} carrying the caller's
+     *              {@code max_dyn_array_count} (§6.2.1), or
+     *              {@link Bound#SCHEMA_BOUNDED} where the schema bounds the array
+     * @param <T>   element type
+     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
+     *                                      {@link SofabException} when {@code id}
+     *                                      is at or past the receiver cap, or an
+     *                                      {@code ARGUMENT} one when {@code bound}
+     *                                      is null
+     */
+    public static <T> void reserveElem(List<T> out, int id, Supplier<T> make, Bound bound) {
+        checkIndex(id, bound);
+        while (out.size() <= id) {
+            out.add(make.get());
+        }
+    }
 
     /**
      * Reserve the row at index {@code id} of a matrix — an array whose elements are
@@ -367,10 +503,17 @@ public final class Seq {
     }
 
     /**
-     * The element-index rule of §6.2.1, written once for all seven reservations:
-     * a bound must have been stated, and where it is a receiver cap the index is
-     * refused before the row is created and before the outer list is grown to hold
-     * it.
+     * The element-index rule of §6.2.1, written once for all nine reservations —
+     * and published for the one site that has none to ride. A bound must have been
+     * stated, and where it is a receiver cap the index is refused before anything is
+     * created and before the list is grown to hold it.
+     *
+     * <p>The site with no reservation is the <b>length word</b> of a {@code string}
+     * or {@code blob} element: generated code bounds the element's index there, so
+     * that a message ending right after that word is refused rather than reported
+     * {@code INCOMPLETE} (MESSAGE_SPEC §5.2), and the placement that follows —
+     * {@link #placeElem} — runs the same comparison again against the same folded
+     * constant.
      *
      * <p>The index is compared with {@code >=} rather than {@code >} because a
      * wrapper array's length is highest present id + 1 (MESSAGE_SPEC §5.1): an
@@ -383,7 +526,7 @@ public final class Seq {
      * would promise a limit to raise that was never configured (§6.3), and not
      * silence, which would decode the index uncapped.
      */
-    private static void checkIndex(int id, Bound bound) {
+    public static void checkIndex(int id, Bound bound) {
         if (Bound.required(bound, "max_dyn_array_count").exceededByIndex(id)) {
             throw overIndexCap(id, bound);
         }

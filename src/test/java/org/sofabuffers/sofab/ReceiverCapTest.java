@@ -327,6 +327,128 @@ class ReceiverCapTest {
         assertEquals(41, rows.size());
     }
 
+    /**
+     * The same bound, on the two element reservations beside the row ones: a leaf
+     * element's placement and a framed element's slot. The cap binds the
+     * <b>index</b> for the same reason — a wrapper array carries no count, so its
+     * length is whatever the highest id says it is.
+     */
+    @Test
+    void anElementIndexAtItsCapIsRefused() {
+        List<String> leaves = new ArrayList<>();
+        assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> Seq.placeElem(leaves, 4, "", "over", Bound.receiver(4)))));
+        assertEquals(0, leaves.size(), "refused, so the list never grew");
+        Seq.placeElem(leaves, 3, "", "last", Bound.receiver(4));
+        assertEquals(4, leaves.size(), "index max - 1 is the last one that fits");
+
+        List<Object> framed = new ArrayList<>();
+        assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> Seq.reserveElem(framed, 4, Object::new, Bound.receiver(4)))));
+        assertEquals(0, framed.size());
+        Seq.reserveElem(framed, 3, Object::new, Bound.receiver(4));
+        assertEquals(4, framed.size());
+    }
+
+    /**
+     * The comparison runs <b>before</b> the element is made. The factory here
+     * throws, so a check made after the growth would surface that instead of the
+     * refusal — and would have made an object for an index the cap forbids.
+     */
+    @Test
+    void theIndexIsRefusedBeforeTheElementIsMade() {
+        List<Object> out = new ArrayList<>();
+        assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> Seq.reserveElem(out, 9, () -> {
+                    throw new AssertionError("the element was made for a refused index");
+                }, Bound.receiver(4)))));
+        assertEquals(0, out.size());
+    }
+
+    /**
+     * CORELIB_PLAN §7.2 item 8: a refused id leaves the container <b>not partially
+     * extended</b>, so a lower id delivered afterwards still lands at its own index.
+     * A growth that ran before the check would have left four defaults behind and
+     * put this element at index 5.
+     */
+    @Test
+    void aRefusedIndexLeavesTheContainerUnextended() {
+        List<String> out = new ArrayList<>();
+        Seq.placeElem(out, 1, "", "b", Bound.receiver(4));
+        assertThrows(UncheckedIOException.class,
+                () -> Seq.placeElem(out, 5, "", "over", Bound.receiver(4)));
+
+        assertEquals(2, out.size(), "the refused element neither grew nor shifted the list");
+        Seq.placeElem(out, 0, "", "a", Bound.receiver(4));
+        assertEquals(List.of("a", "b"), out, "a lower id delivered afterwards still lands");
+    }
+
+    /** As for a row, the schema-bounded statement compares nothing here. */
+    @Test
+    void aSchemaBoundedElementIndexIsTheCallersToCheck() {
+        List<String> out = new ArrayList<>();
+        Seq.placeElem(out, 40, "", "far", Bound.SCHEMA_BOUNDED);
+        assertEquals(41, out.size());
+
+        List<Object> framed = new ArrayList<>();
+        Seq.reserveElem(framed, 40, Object::new, Bound.SCHEMA_BOUNDED);
+        assertEquals(41, framed.size());
+    }
+
+    /**
+     * The same comparison, on its own, for the one site that has no reservation to
+     * ride: a {@code string} or {@code blob} element's index is bounded at the
+     * <b>length word</b>, so a message ending right after that word is refused
+     * rather than reported {@code INCOMPLETE} (MESSAGE_SPEC §5.2).
+     */
+    @Test
+    void theLengthWordLatchTakesTheSameIndexComparison() {
+        assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> Seq.checkIndex(4, Bound.receiver(4)))));
+        Seq.checkIndex(3, Bound.receiver(4));
+        Seq.checkIndex(40, Bound.SCHEMA_BOUNDED);
+        assertEquals(SofabError.ARGUMENT, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> Seq.checkIndex(0, null))));
+    }
+
+    /**
+     * The three comparisons a wrapper-array {@code string} element passes through,
+     * in the order generated code makes them: the element <b>index</b> and the
+     * element <b>length</b> both at the length word, before a byte of payload is
+     * buffered, and the placement after the value exists.
+     *
+     * <p>The element's {@code maxlen} half is {@link PayloadAcc}'s, not
+     * {@link Seq}'s — there is no reservation at the length word for it to ride —
+     * and this pins that the two answer separately and leave the array untouched
+     * when either refuses.
+     */
+    @Test
+    void anElementIsBoundedAtTheLengthWordBeforeItsPayloadIsTaken() {
+        Bound index = Bound.receiver(4);
+        Bound elemMax = Bound.receiver(CAP_VALUE);
+        List<String> out = new ArrayList<>();
+        byte[] p = payload(CAP_VALUE);
+
+        Seq.checkIndex(1, index);
+        PayloadAcc.checkStringLength(p.length, elemMax);
+        Seq.placeElem(out, 1, "", new PayloadAcc().string(p.length, 0, p, 0, p.length, elemMax),
+                index);
+        assertEquals(List.of("", "aaaaaaaa"), out);
+
+        // An element payload over its maxlen: refused at the length word, with no
+        // payload taken and nothing placed.
+        byte[] over = payload(CAP_VALUE + 1);
+        assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> PayloadAcc.checkStringLength(over.length, elemMax))));
+        assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> new PayloadAcc().string(over.length, 0, over, 0, over.length, elemMax))));
+
+        // And an over-cap index is refused at the same word, on its own bound.
+        assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(assertThrows(UncheckedIOException.class,
+                () -> Seq.checkIndex(4, index))));
+        assertEquals(2, out.size(), "neither refusal touched the array");
+    }
+
     // --- the category, and the decode it terminates -------------------------
 
     /**

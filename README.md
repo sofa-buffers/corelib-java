@@ -264,7 +264,10 @@ is an argument, an element type is a type parameter.
 
 | symbol | what it is |
 |---|---|
-| `Seq.reserveRow` / `reserveRowBytes` … `reserveRowDoubles` | place a matrix row at the index its id names, filling a gap with the empty row rather than shifting every later row down (MESSAGE_SPEC §5.1 / §7.4); the receiver cap on that index arrives as a `Bound` and is compared here (§6.2.1) |
+| `Seq.placeElem` | place a wrapper array's decoded `string` or `blob` at the index its id names, filling the gaps omitted interior elements left with the shared element default; a repeated id replaces (MESSAGE_SPEC §5.1 / §7.4) |
+| `Seq.reserveElem` | reserve the slot a wrapper array's `struct`, `union` or nested-array element is routed into, one fresh element per slot from a factory; a re-opened id merges into the element its earlier fields built (§7.4) |
+| `Seq.reserveRow` / `reserveRowBytes` … `reserveRowDoubles` | place a matrix row at the index its id names, filling a gap with the empty row rather than shifting every later row down (MESSAGE_SPEC §5.1 / §7.4) |
+| `Seq.checkIndex` | the element-index bound each of the three reservations above takes, on its own — for the **length word** of a `string`/`blob` element, which has no reservation to ride and must be judged before the payload (§5.2). Where the schema bounds the array this is `Bound.SCHEMA_BOUNDED` and the caller's own `INVALID` governs; where it does not, the `Bound` carries the receiver cap and the comparison happens here (§6.2.1) |
 | `Seq.ensureCap` (one per primitive width) | the array-growth policy: double, stop at the announced count, and never allocate from a count the wire claimed but has not delivered |
 | `Seq.ARRAY_INIT_CAP`, `Seq.EMPTY_BYTES` … `EMPTY_DOUBLES` | the bounded first reservation, and the shared zero-length arrays a field initializer points at |
 | `Seq.reset` / `Seq.orEmpty` / `Seq.boolsToLongs` | re-arm a reused destination in place; absorb a null field on the encode side; the one boxed-to-primitive conversion `bool` still needs |
@@ -293,7 +296,7 @@ the limit guards:
 |---|---|---|
 | `max_dyn_string_len` | `PayloadAcc.string(…, bound)` | the announced `total`, before a byte is buffered |
 | `max_dyn_blob_len` | `PayloadAcc.blob(…, bound)` | the same |
-| `max_dyn_array_count` | `Seq.reserveRow` / `reserveRow*(…, bound)` | the row **index**, before the row and the list grow |
+| `max_dyn_array_count` | `Seq.placeElem` / `reserveElem` / `reserveRow` / `reserveRow*(…, bound)`, and `Seq.checkIndex(…, bound)` at a `string`/`blob` element's length word | the element **index**, before anything is created and before the list grows |
 
 A breach is `SofabError.LIMIT_EXCEEDED` — a policy rejection of well-formed bytes,
 never clamped into a shortened value and never the `INVALID` outcome. It is
