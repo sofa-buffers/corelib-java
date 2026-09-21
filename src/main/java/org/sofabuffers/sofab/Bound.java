@@ -49,16 +49,18 @@ import java.io.UncheckedIOException;
  * {@code long} parameter, with a negative sentinel for "the schema bounds this" —
  * so a caller who had <em>forgotten</em> to state a cap and a caller asserting the
  * schema's rule handed over the identical bit pattern, and the forgotten one decoded
- * uncapped and unreported. Here the verdict travels with the number, and the only
- * ways to make a bound carrying a number are the two named factories.
+ * uncapped and unreported. Here the {@link Rule} travels with the number, and a
+ * bound carrying a number is made by naming its rule: {@link #schema(long)},
+ * {@link #receiver(long)}, or the canonical constructor, which validates exactly as
+ * those two do.
  *
  * <p><b>Both "forgot" values are diagnosed, not obeyed.</b> Java writes an
  * unassigned {@code long} field as {@code 0} and the retired sentinel was
- * {@code -1}; both factories refuse both with {@link SofabError#ARGUMENT}, and a
- * {@code null} reference reaching one of the calls is refused the same way rather
- * than read as <em>no cap</em>. §6.2.1 admits "no unset state and no unlimited
- * mode", and a codec "<b>MUST NOT</b> read an omitted argument as
- * <em>unlimited</em>".
+ * {@code -1}; every way of making a bound refuses both with
+ * {@link SofabError#ARGUMENT}, and a {@code null} reference reaching one of the
+ * calls is refused the same way rather than read as <em>no cap</em>. §6.2.1 admits
+ * "no unset state and no unlimited mode", and a codec "<b>MUST NOT</b> read an
+ * omitted argument as <em>unlimited</em>".
  *
  * <p><b>This library still holds no limit.</b> A {@code Bound} is built by the
  * caller out of the caller's number, used for one comparison and not retained;
@@ -74,42 +76,50 @@ import java.io.UncheckedIOException;
  *
  * <pre>{@code
  * private static final Bound CAP_DYN_ARRAY_COUNT = Bound.receiver(MAX_DYN_ARRAY_COUNT);
- * private static final Bound TAGS_COUNT = Bound.schema(8);
+ * private static final Bound SCHEMA_COUNT_8 = Bound.schema(8);
  *
  * // schema `count: 8` -- compared inside, INVALID_MSG at index 8 and above
- * Seq.placeElem(m.tags, id, "", s, TAGS_COUNT);
+ * Seq.placeElem(m.tags, id, "", s, SCHEMA_COUNT_8);
  * // schema declares no count -- compared inside, LIMIT_EXCEEDED at the cap
  * Seq.placeElem(m.notes, id, "", s, CAP_DYN_ARRAY_COUNT);
  * }</pre>
  *
- * <p>Nothing is allocated per call or per message on that path, and every constant
- * is a {@code static final} object with {@code final} fields, which the JIT folds
- * into the comparison it guards.
+ * <p><b>Why a record.</b> HotSpot treats the {@code final} fields of a record as
+ * true constants, which it does not do for an ordinary class. A
+ * {@code static final Bound} is therefore folded into the comparison it guards —
+ * {@code id >= 8} compiles to a compare against an immediate, exactly the guard
+ * generated code used to emit in front of the call — where a class's field would be
+ * loaded on every call. Measured on the generator's {@code java} bench row
+ * (vehicle_telemetry, decode): about 100 Ir/op, a third of a percent. Nothing is
+ * allocated per call or per message on that path.
  *
  * <p>Instances are immutable and shareable.
+ *
+ * @param max  the stated number — a {@code count}, {@code maxlen} or cap, at least
+ *             {@code 1} — or {@code -1} for {@link #SCHEMA_BOUNDED}, whose rule
+ *             carries none
+ * @param rule which rule the number states, and so which verdict a breach earns
  */
-public final class Bound {
+public record Bound(long max, Rule rule) {
 
-    /** {@link #SCHEMA_BOUNDED}: a statement with no number. */
-    private static final byte STATED = 0;
-    /** {@link #schema(long)}: the schema's bound, INVALID_MSG past it. */
-    private static final byte SCHEMA = 1;
-    /** {@link #receiver(long)}: the deployment's cap, LIMIT_EXCEEDED past it. */
-    private static final byte RECEIVER = 2;
-
-    /**
-     * The number, or {@code -1} for {@link #SCHEMA_BOUNDED}. Only the two factories
-     * produce a non-negative value, and both refuse everything below {@code 1}, so a
-     * non-negative {@code max} here is always a number a caller deliberately stated.
-     *
-     * <p>The {@code -1} is also what keeps the index comparison a single compare:
-     * every index is {@code >= -1}, so {@link #SCHEMA_BOUNDED} always reaches the
-     * out-of-line rejection, which refuses it as {@link SofabError#ARGUMENT}.
-     */
-    private final long max;
-
-    /** Which rule {@link #max} states: {@link #STATED}, {@link #SCHEMA} or {@link #RECEIVER}. */
-    private final byte kind;
+    /** Which of §6.2.1's answers a {@link Bound} states, and so its verdict. */
+    public enum Rule {
+        /**
+         * The schema's own {@code count} or {@code maxlen}, compared by the call:
+         * {@link SofabError#INVALID_MSG} past it. See {@link Bound#schema(long)}.
+         */
+        SCHEMA,
+        /**
+         * The deployment's receiver cap, compared by the call:
+         * {@link SofabError#LIMIT_EXCEEDED} past it. See {@link Bound#receiver(long)}.
+         */
+        RECEIVER,
+        /**
+         * The schema's {@code maxlen}, already enforced by the caller at the same
+         * header, so no number travels. See {@link Bound#SCHEMA_BOUNDED}.
+         */
+        CALLER_CHECKED
+    }
 
     /**
      * The schema bounds this {@code string} or {@code blob} and the caller has
@@ -126,13 +136,37 @@ public final class Bound {
      * <p><b>It bounds no array index.</b> An index has a reservation to ride, and
      * the reservation compares the schema {@code count} itself when handed
      * {@link #schema(long)}; every {@link Seq} call refuses this value as
-     * {@link SofabError#ARGUMENT} rather than growing a list uncompared.
+     * {@link SofabError#ARGUMENT} rather than growing a list uncompared. Its
+     * {@code -1} is what makes that refusal free: every index is {@code >= -1}, so
+     * the one comparison {@link Seq#checkIndex} makes always sends it to the
+     * out-of-line path.
      */
-    public static final Bound SCHEMA_BOUNDED = new Bound(-1L, STATED);
+    public static final Bound SCHEMA_BOUNDED = new Bound(-1L, Rule.CALLER_CHECKED);
 
-    private Bound(long max, byte kind) {
-        this.max = max;
-        this.kind = kind;
+    /**
+     * Validates a bound however it is made: the rule must be stated, a stated
+     * number is at least {@code 1}, and only {@link Rule#CALLER_CHECKED} carries
+     * none ({@code -1}).
+     *
+     * @throws IllegalArgumentException for any other combination; it refines
+     *                                  {@link SofabError#ARGUMENT} (§6.3)
+     */
+    public Bound {
+        if (rule == null) {
+            throw new IllegalArgumentException(
+                    "sofab: " + SofabError.ARGUMENT + " (a bound states its rule)");
+        }
+        if (rule == Rule.CALLER_CHECKED ? max != -1L : max < 1L) {
+            throw new IllegalArgumentException(
+                    "sofab: " + SofabError.ARGUMENT + " (" + rule + " bound " + max
+                            + " is not a limit: " + (rule == Rule.CALLER_CHECKED
+                                    ? "the caller-checked schema statement carries no number"
+                                    : "a count, maxlen or cap is at least 1, and "
+                                            + (max == 0L ? "0 is an unassigned field, not a policy"
+                                                         : "a negative is not \"the schema bounds "
+                                                                 + "this\" -- pass Bound.schema(n) for that"))
+                            + ")");
+        }
     }
 
     /**
@@ -161,12 +195,7 @@ public final class Bound {
      *                                  bound
      */
     public static Bound schema(long n) {
-        if (n < 1L) {
-            throw new IllegalArgumentException(
-                    "sofab: " + SofabError.ARGUMENT + " (schema bound " + n
-                            + " is not a count or maxlen: a schema admits 1 and above)");
-        }
-        return new Bound(n, SCHEMA);
+        return new Bound(n, Rule.SCHEMA);
     }
 
     /**
@@ -203,16 +232,7 @@ public final class Bound {
      *                                  on the decode path
      */
     public static Bound receiver(long max) {
-        if (max < 1L) {
-            throw new IllegalArgumentException(
-                    "sofab: " + SofabError.ARGUMENT + " (receiver cap " + max
-                            + " is not a limit: a cap is at least 1, and "
-                            + (max == 0L ? "0 is an unassigned field, not a policy"
-                                         : "a negative is not \"the schema bounds this\" — "
-                                                 + "pass Bound.schema(n) for that")
-                            + ")");
-        }
-        return new Bound(max, RECEIVER);
+        return new Bound(max, Rule.RECEIVER);
     }
 
     /**
@@ -224,7 +244,7 @@ public final class Bound {
      * @return true if a number is stated and {@code length} is above it
      */
     boolean exceededBy(long length) {
-        return kind != STATED && length > max;
+        return rule != Rule.CALLER_CHECKED && length > max;
     }
 
     /**
@@ -237,7 +257,7 @@ public final class Bound {
      * @return the exception to throw
      */
     UncheckedIOException rejectLength(String noun, long length) {
-        if (kind == SCHEMA) {
+        if (rule == Rule.SCHEMA) {
             return Sofab.invalid(noun + " " + length + " above schema maxlen " + max);
         }
         return Sofab.limitExceeded(noun + " " + length + " above configured limit " + max);
@@ -249,22 +269,22 @@ public final class Bound {
      * {@link #SCHEMA_BOUNDED}.
      *
      * <ul>
-     *   <li>{@link #schema(long)}: INVALID_MSG. An index at or past the schema
+     *   <li>{@link Rule#SCHEMA}: INVALID_MSG. An index at or past the schema
      *       {@code count} makes an array longer than the schema's capacity
      *       (MESSAGE_SPEC §7.1).
-     *   <li>{@link #receiver(long)}: LIMIT_EXCEEDED. An element at index {@code cap}
+     *   <li>{@link Rule#RECEIVER}: LIMIT_EXCEEDED. An element at index {@code cap}
      *       makes a list of {@code cap + 1}, one more than the receiver said it would
      *       hold (§6.2.1). Rejected, never clamped — placing it at {@code cap - 1}
      *       instead would be data corruption.
-     *   <li>{@link #SCHEMA_BOUNDED}: ARGUMENT. It carries no count, so the call has
-     *       nothing to compare; silence would grow the list uncompared.
+     *   <li>{@link Rule#CALLER_CHECKED}: ARGUMENT. It carries no count, so the call
+     *       has nothing to compare; silence would grow the list uncompared.
      * </ul>
      *
      * @param index the wire's element index
      * @return the exception to throw
      */
     UncheckedIOException rejectIndex(long index) {
-        switch (kind) {
+        switch (rule) {
             case SCHEMA:
                 return Sofab.invalid("array element index " + index + " above schema capacity " + max);
             case RECEIVER:
@@ -274,16 +294,6 @@ public final class Bound {
                         + "array index: pass Bound.schema(count) where the schema bounds the "
                         + "array, or Bound.receiver(n) where it does not");
         }
-    }
-
-    /**
-     * The stated number — what {@link Seq#checkIndex} compares an index against,
-     * and what a diagnostic names. Negative for {@link #SCHEMA_BOUNDED}.
-     *
-     * @return the number
-     */
-    long cap() {
-        return max;
     }
 
     /**
@@ -312,7 +322,7 @@ public final class Bound {
      */
     @Override
     public String toString() {
-        switch (kind) {
+        switch (rule) {
             case SCHEMA:
                 return "Bound.schema(" + max + ")";
             case RECEIVER:

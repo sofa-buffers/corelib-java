@@ -123,11 +123,10 @@ class ForgottenCapTest {
     }
 
     /**
-     * The numberless schema statement is an object with no number in it, and the
-     * only ways to produce a bound carrying one are the two named factories, each
-     * of which fixes the verdict with the number. So a receiver cap and a schema
-     * bound do not share a representation at all — not merely different values of
-     * one.
+     * The numberless schema statement is an object with no number in it, and every
+     * bound that carries one names its {@link Bound.Rule} beside it — through the
+     * two named factories, or the validated canonical constructor. So a receiver cap
+     * and a schema bound differ in their rule, not merely in their value.
      */
     @Test
     void theSchemaStatementCarriesNoNumber() throws Exception {
@@ -187,6 +186,20 @@ class ForgottenCapTest {
             assertInstanceOf(IllegalArgumentException.class, e.getCause());
         }
         assertNotNull(schema.invoke(null, 1L), "1 is the smallest schema count");
+
+        // The canonical constructor a record exposes is not a way around either
+        // factory: it validates exactly as they do, and the numberless statement
+        // cannot be given a number (nor a numbered rule go without one).
+        for (Bound.Rule rule : new Bound.Rule[] {Bound.Rule.SCHEMA, Bound.Rule.RECEIVER}) {
+            for (long forgotten : new long[] {0L, -1L, Long.MIN_VALUE}) {
+                assertThrows(IllegalArgumentException.class, () -> new Bound(forgotten, rule),
+                        "new Bound(" + forgotten + ", " + rule + ") must not become a bound");
+            }
+        }
+        assertThrows(IllegalArgumentException.class, () -> new Bound(5L, Bound.Rule.CALLER_CHECKED));
+        assertThrows(IllegalArgumentException.class, () -> new Bound(5L, null));
+        assertEquals(Bound.schema(5), new Bound(5L, Bound.Rule.SCHEMA), "the same value either way");
+        assertEquals(Bound.SCHEMA_BOUNDED, new Bound(-1L, Bound.Rule.CALLER_CHECKED));
     }
 
     /**
