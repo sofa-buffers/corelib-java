@@ -65,13 +65,14 @@ import java.util.function.Supplier;
  * <b>one</b> implementation: a caller that passes the bound does not also guard in
  * front of the call.
  *
- * <p>{@link #checkIndex} is that comparison on its own, published for the one site
- * that has no reservation to ride: a generated {@code fixlenBegin} arm bounds a
- * {@code string} or {@code blob} element's index at the <b>length word</b>, so that
- * a message ending right there is still refused rather than reported
- * {@code INCOMPLETE} (MESSAGE_SPEC §5.2). The placement that follows re-runs it,
- * which costs one comparison against a folded constant and spares the two sites
- * from having to agree by inspection.
+ * <p>{@link #checkIndex} is that comparison on its own, published for the sites
+ * that must judge the index before the reservation runs: a generated
+ * {@code fixlenBegin} arm bounds a {@code string} or {@code blob} element's index at
+ * the <b>length word</b>, so that a message ending right there is still refused
+ * rather than reported {@code INCOMPLETE} (MESSAGE_SPEC §5.2), and a native matrix
+ * row's header judges the row's index before the row's own element count. The
+ * reservation that follows re-runs it, which costs one comparison against a folded
+ * constant and spares the two sites from having to agree by inspection.
  *
  * <p><b>Nothing here holds a limit.</b> The number is the caller's, used for that
  * one comparison and not retained; there is no default, no fallback and no
@@ -80,8 +81,9 @@ import java.util.function.Supplier;
  * same way.
  *
  * <p><b>The two answers are separate values, and an unstated one is refused.</b>
- * {@link Bound#schema(long)} and {@link Bound#receiver(long)} are the only ways to
- * reach the comparison with a number, and each carries its own verdict, so a
+ * A {@link Bound} reaches the comparison with a number only by naming its rule —
+ * {@link Bound#schema(long)} or {@link Bound#receiver(long)} — and each carries its
+ * own verdict, so a
  * caller who never configured a cap cannot arrive here spelling what a
  * schema-bounded array spells. A {@code null}, and {@link Bound#SCHEMA_BOUNDED}
  * (which carries no count), are {@link Sofab#argument} rather than an uncompared
@@ -589,9 +591,8 @@ public final class Seq {
      *                                      is null or {@link Bound#SCHEMA_BOUNDED}
      */
     public static void checkIndex(int id, Bound bound) {
-        Bound b = Bound.required(bound, "the array element index");
-        if (id >= b.cap()) {
-            throw b.rejectIndex(id);
+        if (bound == null || id >= bound.max()) {
+            throw Bound.required(bound, "the array element index").rejectIndex(id);
         }
     }
 

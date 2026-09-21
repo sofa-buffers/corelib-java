@@ -589,7 +589,7 @@ class ReceiverCapTest {
         // Bound this library defines states which RULE governs a field and carries
         // no number at all, so it cannot be read as a limit.
         assertEquals("Bound.SCHEMA_BOUNDED", Bound.SCHEMA_BOUNDED.toString());
-        assertTrue(Bound.SCHEMA_BOUNDED.cap() < 0, "it states a rule, not a limit value");
+        assertTrue(Bound.SCHEMA_BOUNDED.max() < 0, "it states a rule, not a limit value");
         assertEquals(Integer.MAX_VALUE, Sofab.ID_MAX);
         assertEquals(Integer.MAX_VALUE, Sofab.ARRAY_MAX);
     }

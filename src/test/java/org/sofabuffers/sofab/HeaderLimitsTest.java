@@ -513,7 +513,7 @@ class HeaderLimitsTest {
             }
             if (boundFor(ceiling.arrayCap()).exceededBy(count)) {
                 throw Sofab.limitExceeded("element count " + count
-                        + " above configured limit " + ceiling.arrayCap().cap());
+                        + " above configured limit " + ceiling.arrayCap().max());
             }
         }
 
