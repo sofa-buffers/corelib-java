@@ -1,8 +1,16 @@
 name: "Version consistency"
 
-# The git tag is the source of truth for the version: the Maven project version
-# in pom.xml must match it. Modelled on corelib-c-cpp's workflow of the same
-# name, minus the manifests this repo does not have — Maven is the only one.
+# The git tag is the source of truth for the version: every place the repository
+# writes it must match. Modelled on corelib-c-cpp's workflow of the same name —
+# one step per file, each guarded with `if: ${{ !cancelled() }}` so a mismatch in
+# the first file still reports the others instead of hiding them.
+#
+# Maven is the only *manifest*, but pom.xml is not the only copy: README.md
+# states the artifact version twice — in the coordinates prose and in the
+# copy-pasteable dependency snippet — and nothing but this workflow watches them.
+# They have gone stale after a release before (e65503a shipped v0.10.0 with a
+# README still advertising 0.9.0), which is exactly what the tag being the source
+# of truth is supposed to rule out.
 #
 # Tags only: the comparison is only meaningful when there is a tag to compare
 # against. Between releases pom.xml may legitimately sit ahead of the newest
@@ -23,23 +31,62 @@ jobs:
   check-versions:
     name: Check versions
     runs-on: ubuntu-latest
-    # Bound the job: checkout plus one XML read, a couple of seconds at most.
+    # Bound the job: checkout plus a couple of file reads, seconds at most.
     # A wedged job would otherwise hold one of the account's 20 Actions slots
     # for GitHub's six-hour default.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check Maven (pom.xml)
+      # The tag, minus its leading `v`, is what every file is compared against.
+      # The workflow triggers on `v*` only, so GITHUB_REF_NAME always carries it.
+      - name: Reference version (git tag)
         shell: bash
         run: |
           set -euo pipefail
-          ref_version="${GITHUB_REF_NAME#v}"
+          echo "tag=$GITHUB_REF_NAME"
+          echo "REF_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Check Maven (pom.xml)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
           # The project's own <version> is a direct child of <project>; a
           # dependency's or a plugin's version sits deeper, so parse the XML
           # instead of grepping the first match.
           version=$(python3 -c 'import xml.etree.ElementTree as ET; v = ET.parse("pom.xml").getroot().find("{http://maven.apache.org/POM/4.0.0}version"); print("" if v is None else (v.text or "").strip())')
           [[ -n "$version" ]] || { echo "::error::pom.xml: no project <version> found"; exit 1; }
-          echo "tag=$ref_version  pom.xml=$version"
-          [[ "$version" == "$ref_version" ]] || {
-            echo "::error::pom.xml version: '$version' != tag '$ref_version'"; exit 1; }
+          echo "pom.xml=$version"
+          [[ "$version" == "$REF_VERSION" ]] || {
+            echo "::error::pom.xml version: '$version' != tag '$REF_VERSION'"; exit 1; }
+
+      - name: Check README (README.md)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Both reads are anchored on their surrounding wording rather than
+          # sweeping the file for a semver triple: the prose is full of
+          # CORELIB_PLAN section numbers (§6.2.1, §6.6.3) that a pattern sweep
+          # would read as versions.
+          #
+          # Every occurrence of each form is checked, not just the first, so a
+          # second dependency snippet cannot be added and left behind. An
+          # anchor that matches nothing is itself a failure: the wording was
+          # rewritten and the version it carries is no longer being watched.
+          mapfile -t prose < <(grep -oP 'Maven coordinates `org\.sofabuffers:corelib` \(version `\K[^`]+' README.md)
+          mapfile -t snippet < <(grep -oP '^\s*<version>\K[^<]+' README.md)
+
+          fail=0
+          (( ${#prose[@]} )) || {
+            echo "::error::README.md: the 'Maven coordinates \`org.sofabuffers:corelib\` (version \`X.Y.Z\`)' wording is gone — its version is no longer checked"; fail=1; }
+          (( ${#snippet[@]} )) || {
+            echo "::error::README.md: no <version> element in the dependency snippet — its version is no longer checked"; fail=1; }
+
+          for version in ${prose[@]+"${prose[@]}"} ${snippet[@]+"${snippet[@]}"}; do
+            echo "README.md=$version"
+            [[ "$version" == "$REF_VERSION" ]] || {
+              echo "::error file=README.md::README.md version: '$version' != tag '$REF_VERSION'"; fail=1; }
+          done
+          exit "$fail"

@@ -14,21 +14,32 @@ landed on Maven Central.
 
 **The git tag is the source of truth for the version.**
 `.github/workflows/version-consistency.yaml` runs on `v*` tag pushes only and
-fails the tag unless the `<project><version>` in `pom.xml` equals the tag minus
-its leading `v`. It checks nothing else — every other copy below is on you.
+fails the tag unless **every** version string in the repository equals the tag
+minus its leading `v` — `pom.xml`'s `<project><version>` and both copies in
+`README.md`, each in its own step so one mismatch still reports the others.
 
 ## Where the version is written
 
-| Place | What | Checked by CI? |
+| Place | What | Checked on tag push? |
 |---|---|---|
-| `pom.xml` `<project><version>` | the only manifest in the repo | **yes** (on tag push) |
-| `pom.xml` comment block above `<version>` | the in-place changelog: what this version breaks and why | no |
-| `README.md` "Maven coordinates `org.sofabuffers:corelib` (version `X.Y.Z`)" | prose | no |
-| `README.md` `<version>X.Y.Z</version>` in the dependency snippet | copy-pasteable POM | no |
-| `Sofab.API_VERSION` | **wire** contract, not this artifact's version | no |
+| `pom.xml` `<project><version>` | the only manifest in the repo | **yes** |
+| `README.md` "Maven coordinates `org.sofabuffers:corelib` (version `X.Y.Z`)" | prose | **yes** |
+| `README.md` `<version>X.Y.Z</version>` in the dependency snippet | copy-pasteable POM | **yes** |
+| `pom.xml` comment block above `<version>` | the in-place changelog: what this version breaks and why | no — prose, judge it yourself |
+| `Sofab.API_VERSION` | **wire** contract, not this artifact's version | no — must *not* track the tag |
 
-Check both README spots by hand — they have gone stale before
-(`e65503a docs(readme): correct the stale artifact version (0.9.0 -> 0.10.0)`):
+The README checks are anchored on their surrounding wording, not on a semver
+pattern (the prose is full of `§6.2.1`-style section numbers). So **rewriting
+either sentence fails the check by design** — an anchor that matches nothing
+means that version stopped being watched. If you reword the coordinates line or
+add a second dependency snippet, update the step's `grep` in the same PR.
+
+Add a new place the version is written → add a step for it. The check is the
+only thing standing between a release and the drift of
+`e65503a docs(readme): correct the stale artifact version (0.9.0 -> 0.10.0)`,
+which shipped v0.10.0 with a README still advertising 0.9.0.
+
+Locally, before you tag:
 
 ```bash
 grep -nE '\b[0-9]+\.[0-9]+\.[0-9]+\b' README.md pom.xml | grep -v '<!--'
