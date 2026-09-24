@@ -12,19 +12,41 @@
        is what Maven admits) plus artifactId corelib. The normative half is the
        namespace, and every symbol is under org.sofabuffers.sofab. -->
   <artifactId>corelib</artifactId>
-  <!-- 0.13.0: source-breaking. IStream.feed now RETURNS the decode outcome —
+  <!-- 0.13.0: source-breaking, in three places. Sofab.API_VERSION is the WIRE
+       contract and stays 1 through all of them: the bytes are unchanged.
+
+       (a) IStream.feed now RETURNS the decode outcome —
        DecodeStatus.COMPLETE or INCOMPLETE for the bytes consumed so far — on both
        overloads, and the separate IStream.status() accessor is gone. One fact had
-       two readers and they could disagree: 0.12.x shipped exactly that drift, a
+       two readers and they could disagree: 0.12.x carried exactly that drift, a
        refusal thrown from feed while status() still answered COMPLETE for the same
        message. A refusal keeps travelling on the error channel with its code on the
-       exception (INVALID_MSG, LIMIT_EXCEEDED), so DecodeStatus also loses the
-       LIMIT_EXCEEDED constant that existed only for status() to report it: §6.3
+       exception (INVALID_MSG, LIMIT_EXCEEDED, ARGUMENT), so DecodeStatus also loses
+       the LIMIT_EXCEEDED constant that existed only for status() to report it: §6.3
        offers a fourth decode outcome OR a terminal failure on the error channel,
        and this port takes the second. Callers that read status() read feed's return
        instead; callers that branched on DecodeStatus.LIMIT_EXCEEDED catch
-       SofabException and switch on error(). Sofab.API_VERSION is the WIRE contract
-       and stays 1: the bytes are unchanged.
+       SofabException and switch on error().
+
+       (b) A Visitor.arrayBulk destination of a fillable type but shorter than the
+       announced count is refused with ARGUMENT, terminally, instead of falling back
+       to per-element delivery (§6.6.3; §6.3's table lists "a destination too short
+       for the value it was handed" under that code). The fallback was silent data
+       loss on a well-formed message: a visitor overriding arrayBulk alone — the
+       documented shape for an integer array — had every element delivered to
+       inherited no-ops, never saw arrayBulkEnd, and read COMPLETE off the feed that
+       dropped them. Declining is untouched: null, or any type the decoder cannot
+       fill, is not a destination at all and still falls back per-element.
+
+       (c) The Seq reservations (placeElem, reserveElem, reserveRow*) and
+       Seq.checkIndex compare a wrapper array's schema count themselves, and so
+       refuse the countless Bound.SCHEMA_BOUNDED with ARGUMENT rather than growing
+       the list uncompared. Pass Bound.schema(count) where the schema bounds the
+       array: id >= count is INVALID_MSG, a receiver cap stays LIMIT_EXCEEDED, and
+       exactly one of the two is ever handed in (§6.2.1). SCHEMA_BOUNDED remains for
+       the one case with no second number to compare — a string/blob whose maxlen
+       the caller already enforced at the length word, where PayloadAcc has nothing
+       to hold it to.
        (0.12.0: source-breaking. The three §6.2.1 receiver caps became arguments on
        the calls generated code already makes — PayloadAcc.string/blob take the cap
        on the announced length, Seq.reserveRow* the cap on the row index — so every
