@@ -118,8 +118,15 @@ That is exactly what `v0.10.0` did: branch `release/v0.10.0`, one commit
 `chore(release): 0.10.0`, merged as a **merge commit** (PR #55), then tagged.
 Keep the merge commit — the tags point at merge commits.
 
-**5. Tag `main`.** Make it **annotated** (`v0.9.0` was, `v0.10.0` was not — the
-annotated form is the one to keep):
+**5. Tag `main`.** The tag name is always a **lowercase `v` followed by the bare
+semver** — `v1.2.3`, never `V1.2.3`, `1.2.3`, `release-1.2.3` or any suffix. The
+workflow's trigger is the case-sensitive glob `v*` and its comparison strips
+exactly one leading `v`, so a tag named anything else is worse than a failure:
+`1.2.3` and `V1.2.3` never fire the check at all, and the release goes out with
+pom and tag unverified.
+
+Make it **annotated** (`v0.9.0` was, `v0.10.0` was not — the annotated form is
+the one to keep):
 
 ```bash
 git switch main && git pull -p
@@ -166,6 +173,8 @@ for the version being released already contains the wording to draw on.
 
 ## Never
 
+- Never name a tag anything but `vX.Y.Z`, lowercase `v` — every other form
+  slips past the `v*` trigger unchecked.
 - Never tag before `pom.xml`'s version equals the tag without its `v`.
 - Never bump `Sofab.API_VERSION` for a Java-only source break.
 - Never hand-edit `assets/test_vectors.json`.
