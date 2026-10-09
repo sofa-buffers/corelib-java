@@ -399,7 +399,12 @@ it is not part of the codec.
   string type, so the only value it cannot represent as well-formed UTF-8 is an
   unpaired UTF-16 surrogate, and `writeString` rejects such a string with
   `SofabException` (`ARGUMENT`) **before** emitting any bytes, never lossily
-  substituting a replacement character. There is no strict mode to toggle. The
+  substituting a replacement character. There is no strict mode to toggle.
+  `writeString(id, text, maxlen)` adds the caller's byte bound: a string that
+  encodes to more than `maxlen` UTF-8 bytes is refused the same way (`ARGUMENT`,
+  before any byte), measured in the pass that already computes the length, so a
+  bounded write costs no second pass and no allocation. Generated code passes the
+  schema's `maxlen` there; the library holds no bound of its own. The
   byte-container entry point `writeFixlen(id, data, from, length,
   FixlenType.STRING)` takes raw bytes, so it validates that range with `Utf8.valid`
   and refuses a malformed payload with `ARGUMENT`, again before a byte is written.
