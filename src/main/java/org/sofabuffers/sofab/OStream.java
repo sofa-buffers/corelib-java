@@ -788,7 +788,13 @@ public final class OStream {
      * @throws IOException on buffer overflow or sink failure
      */
     public void writeString(int id, String text) throws IOException {
-        writeString(id, text, Integer.MAX_VALUE);
+        int len = text.length();
+        int ascii = asciiPrefix(text);
+        if (ascii == len) {
+            writeAsciiString(id, text, len);
+            return;
+        }
+        writeMeasuredString(id, text, utf8Length(text, ascii));
     }
 
     /**
@@ -813,6 +819,29 @@ public final class OStream {
      * @throws IOException on buffer overflow or sink failure
      */
     public void writeString(int id, String text, int maxlen) throws IOException {
+        // Same shape as the unbounded write, with the bound compared where each
+        // length becomes known: the char count first (a lower bound of the byte
+        // length), the byte length after the measuring pass.
+        int len = text.length();
+        if (len > maxlen) {
+            throw overMaxlen(len, maxlen);
+        }
+        int ascii = asciiPrefix(text);
+        if (ascii == len) {
+            writeAsciiString(id, text, len);
+            return;
+        }
+        int n = utf8Length(text, ascii);
+        if (n > maxlen) {
+            throw overMaxlen(n, maxlen);
+        }
+        writeMeasuredString(id, text, n);
+    }
+
+    /**
+     * Header and payload of an all-ASCII string of {@code len} chars (= bytes).
+     */
+    private void writeAsciiString(int id, String text, int len) throws IOException {
         // Encode UTF-8 straight into the output buffer instead of allocating an
         // intermediate byte[] per call (String.getBytes). One pass measures the
         // byte length for the fixlen header, the second emits the bytes.
@@ -828,8 +857,8 @@ public final class OStream {
         //
         // getBytes(int,int,byte[],int) is deprecated for the reason that makes it
         // right here: it copies low bytes, not an encoding, so it is wrong for any
-        // string that is not known to be single-byte. This one is -- the scan above
-        // proved every char below 0x80 -- and it is the only way to reach the
+        // string that is not known to be single-byte. This one is -- the caller's scan
+        // (asciiPrefix) proved every char below 0x80 -- and it is the only way to reach the
         // string's storage without allocating a byte[] first (which is exactly what
         // encoding into the output buffer exists to avoid). Deprecated since 1.1,
         // never marked forRemoval.
@@ -842,25 +871,17 @@ public final class OStream {
         // not the offset the payload starts at. A string that does not fit falls
         // through to writeUtf8, which is what this path replaces and handles both
         // the in-room loop and the buffer-spanning one.
-        int len = text.length();
-        if (len > maxlen) {
-            throw overMaxlen(len, maxlen);
+        writeIdTypeValue(id, T_FIXLEN, ((long) len << 3) | FixlenType.STRING.raw());
+        if (len >= ASCII_BULK_MIN && end - offset >= len) {
+            text.getBytes(0, len, buffer, offset);
+            offset += len;
+        } else {
+            writeUtf8(text, len);
         }
-        int ascii = asciiPrefix(text);
-        if (ascii == len) {
-            writeIdTypeValue(id, T_FIXLEN, ((long) len << 3) | FixlenType.STRING.raw());
-            if (len >= ASCII_BULK_MIN && end - offset >= len) {
-                text.getBytes(0, len, buffer, offset);
-                offset += len;
-            } else {
-                writeUtf8(text, len);
-            }
-            return;
-        }
-        int n = utf8Length(text, ascii);
-        if (n > maxlen) {
-            throw overMaxlen(n, maxlen);
-        }
+    }
+
+    /** Header and payload of a string whose UTF-8 length {@code n} is measured. */
+    private void writeMeasuredString(int id, String text, int n) throws IOException {
         writeIdTypeValue(id, T_FIXLEN, ((long) n << 3) | FixlenType.STRING.raw());
         writeUtf8(text, n);
     }
