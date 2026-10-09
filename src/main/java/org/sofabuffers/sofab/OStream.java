@@ -788,6 +788,31 @@ public final class OStream {
      * @throws IOException on buffer overflow or sink failure
      */
     public void writeString(int id, String text) throws IOException {
+        writeString(id, text, Integer.MAX_VALUE);
+    }
+
+    /**
+     * Write a string field whose UTF-8 byte length must not exceed {@code maxlen}.
+     *
+     * <p>The bound is the caller's -- generated code passes the schema's
+     * {@code maxlen} for the field (or the element of a string array); this
+     * library holds no bound of its own. A string longer than {@code maxlen}
+     * UTF-8 bytes is refused with {@link SofabError#ARGUMENT} <em>before</em> any
+     * byte of the field is written, exactly like an unpaired surrogate. The byte
+     * length is only known after the measuring pass this method runs anyway, so
+     * the comparison costs no second pass and no allocation; a string with more
+     * UTF-16 chars than {@code maxlen} is refused before that pass, since every
+     * char contributes at least one byte.
+     *
+     * @param id     field id
+     * @param text   string value
+     * @param maxlen the most UTF-8 bytes {@code text} may encode to
+     * @throws SofabException with {@link SofabError#ARGUMENT} if {@code text}
+     *         encodes to more than {@code maxlen} bytes or contains an unpaired
+     *         surrogate (invalid UTF-8)
+     * @throws IOException on buffer overflow or sink failure
+     */
+    public void writeString(int id, String text, int maxlen) throws IOException {
         // Encode UTF-8 straight into the output buffer instead of allocating an
         // intermediate byte[] per call (String.getBytes). One pass measures the
         // byte length for the fixlen header, the second emits the bytes.
@@ -817,8 +842,11 @@ public final class OStream {
         // not the offset the payload starts at. A string that does not fit falls
         // through to writeUtf8, which is what this path replaces and handles both
         // the in-room loop and the buffer-spanning one.
-        int ascii = asciiPrefix(text);
         int len = text.length();
+        if (len > maxlen) {
+            throw overMaxlen(len, maxlen);
+        }
+        int ascii = asciiPrefix(text);
         if (ascii == len) {
             writeIdTypeValue(id, T_FIXLEN, ((long) len << 3) | FixlenType.STRING.raw());
             if (len >= ASCII_BULK_MIN && end - offset >= len) {
@@ -830,8 +858,21 @@ public final class OStream {
             return;
         }
         int n = utf8Length(text, ascii);
+        if (n > maxlen) {
+            throw overMaxlen(n, maxlen);
+        }
         writeIdTypeValue(id, T_FIXLEN, ((long) n << 3) | FixlenType.STRING.raw());
         writeUtf8(text, n);
+    }
+
+    /**
+     * The refusal of a string past the caller's {@code maxlen}. {@code atLeast}
+     * is the UTF-8 byte length when it was measured, or the char count -- a lower
+     * bound of it -- when the string was refused before the measuring pass.
+     */
+    private static SofabException overMaxlen(int atLeast, int maxlen) {
+        return new SofabException(SofabError.ARGUMENT,
+                "string of at least " + atLeast + " UTF-8 bytes is above maxlen " + maxlen);
     }
 
     /**
