@@ -268,9 +268,11 @@ class EncoderOverloadsTest {
 
     @Test
     void constructorValidatesArguments() {
-        assertThrows(IllegalArgumentException.class, () -> new OStream(new byte[0]));
         assertThrows(IllegalArgumentException.class, () -> new OStream(new byte[8], 9));
-        assertThrows(IllegalArgumentException.class, () -> new OStream(null));
+        assertThrows(IllegalArgumentException.class, () -> new OStream((byte[]) null));
+        // An EMPTY buffer is not an invalid argument: without a sink §5.1 imposes no
+        // minimum, and zero is the MAX_SIZE of a message with no fields.
+        new OStream(new byte[0]);
     }
 
     @Test
@@ -291,7 +293,7 @@ class EncoderOverloadsTest {
         });
         assertEquals(List.of(42L), got);
 
-        assertThrows(IllegalArgumentException.class, () -> os.bufferSet(new byte[0], 0));
+        assertThrows(IllegalArgumentException.class, () -> os.bufferSet((byte[]) null, 0));
         assertThrows(IllegalArgumentException.class, () -> os.bufferSet(new byte[4], 99));
     }
 }

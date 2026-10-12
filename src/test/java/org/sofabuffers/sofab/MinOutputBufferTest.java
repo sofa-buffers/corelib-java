@@ -119,6 +119,52 @@ class MinOutputBufferTest {
     }
 
     /**
+     * The degenerate end of the same rule, and the case the handover check used to
+     * refuse outright (sofa-buffers/generator#738). "No minimum" includes zero:
+     * MESSAGE_SPEC §2 makes the all-default message the empty byte string, so a
+     * message with no fields has {@code MAX_SIZE == 0} and a caller sizing from it
+     * hands over an empty array. That is a buffer with no room left, not a broken
+     * one — writing into it is BUFFER_FULL — and {@code overScratch(0)}, which is
+     * what the generated one-shot {@code encode()} calls, has to answer the same way.
+     */
+    @Test
+    void aZeroLengthBufferIsAnInstallationWithNoRoom() throws IOException {
+        OStream empty = new OStream(new byte[0]);
+        assertEquals(0, empty.bytesUsed(), "nothing is written yet");
+        assertArrayEquals(new byte[0], empty.copyOfBytesUsed(),
+                "the message that encodes to nothing encodes to nothing");
+        SofabException e = assertThrows(SofabException.class, () -> empty.writeUnsigned(1, 1),
+                "a write into no room is refused");
+        assertEquals(SofabError.BUFFER_FULL, e.error(),
+                "and refused as capacity, not as a bad argument");
+
+        // overScratch(0) is the same ASK -- it is what the generated one-shot
+        // encode() of a field-less message makes -- but not the same buffer: the
+        // per-thread scratch only ever grows, so what comes back may be larger than
+        // what was asked for. What has to hold either way is that the ask is legal
+        // and that nothing is written.
+        OStream scratch = OStream.overScratch(0);
+        assertEquals(0, scratch.bytesUsed(), "nothing is written yet");
+        assertArrayEquals(new byte[0], scratch.copyOfBytesUsed(), "and nothing comes out");
+
+        // The same installation mid-stream, in both directions.
+        byte[] buf = new byte[4];
+        OStream os = new OStream(buf);
+        os.bufferSet(new byte[0], 0);
+        assertEquals(SofabError.BUFFER_FULL,
+                assertThrows(SofabException.class, () -> os.writeUnsigned(1, 1)).error());
+        os.reset(buf);
+        os.writeUnsigned(1, 1);
+        assertEquals(2, os.bytesUsed(), "a real buffer installed after it writes again");
+
+        // Only a null array is still refused, and a sink still cannot take one:
+        // a buffer it could never flush through is what §5.1 forbids.
+        assertThrows(IllegalArgumentException.class, () -> new OStream((byte[]) null));
+        assertThrows(IllegalArgumentException.class,
+                () -> new OStream(new byte[0], 0, (data, off, len) -> { }));
+    }
+
+    /**
      * The repro from the report: a zero-usable-byte buffer with a sink used to be
      * accepted, and the first flush emitted the untouched reservation as if it were
      * message content.

@@ -174,11 +174,22 @@ class OStreamScratchTest {
                 "the next message landed in the foreign buffer, overwriting its first");
     }
 
-    /** A size that could not hold anything is refused where it is asked for. */
+    /**
+     * A negative size is refused where it is asked for. Zero is not negative: it is
+     * the {@code MAX_SIZE} of a message with no fields, whose encoding is the empty
+     * byte string (MESSAGE_SPEC §2), and the generated one-shot {@code encode()}
+     * asks for exactly that (sofa-buffers/generator#738). What it gets back is a
+     * stream that has written nothing -- over whatever buffer this thread already
+     * holds, since the scratch only ever grows.
+     */
     @Test
-    void aNonPositiveSizeIsRefused() {
-        assertThrows(IllegalArgumentException.class, () -> OStream.overScratch(0));
+    void aNegativeSizeIsRefusedButZeroIsASize() {
         assertThrows(IllegalArgumentException.class, () -> OStream.overScratch(-1));
+
+        OStream os = OStream.overScratch(0);
+        assertEquals(0, os.bytesUsed(), "nothing written");
+        assertArrayEquals(new byte[0], os.copyOfBytesUsed(),
+                "the message that encodes to nothing encodes to nothing");
     }
 
     // --- copyOfBytesUsed -----------------------------------------------------

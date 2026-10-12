@@ -55,8 +55,10 @@ class EncoderPathCoverageTest {
     }
 
     @Test
-    void constructorRejectsEmptyBuffer() {
-        assertThrows(IllegalArgumentException.class, () -> new OStream(new byte[0]));
+    void constructorAcceptsEmptyBuffer() {
+        // Without a sink no minimum applies (§5.1), and zero is the MAX_SIZE of a
+        // message with no fields: an installation with no room, not a broken one.
+        assertEquals(0, new OStream(new byte[0]).bytesUsed());
     }
 
     @Test
@@ -77,9 +79,10 @@ class EncoderPathCoverageTest {
     }
 
     @Test
-    void bufferSetRejectsEmptyBuffer() {
+    void bufferSetAcceptsEmptyBufferAndRejectsNull() {
         OStream os = new OStream(new byte[8]);
-        assertThrows(IllegalArgumentException.class, () -> os.bufferSet(new byte[0], 0));
+        os.bufferSet(new byte[0], 0);
+        assertEquals(0, os.bytesUsed());
         assertThrows(IllegalArgumentException.class, () -> os.bufferSet(null, 0));
     }
 
