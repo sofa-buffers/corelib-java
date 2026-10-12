@@ -197,7 +197,7 @@ public final class OStream {
      * Create an encoder over {@code buffer} with no flush sink. Writing past the
      * end of the buffer raises {@link SofabError#BUFFER_FULL}.
      *
-     * @param buffer caller-owned output buffer (length &gt; 0)
+     * @param buffer caller-owned output buffer
      */
     public OStream(byte[] buffer) {
         this(buffer, 0, null);
@@ -223,13 +223,13 @@ public final class OStream {
      * usable bytes — {@code buffer.length - offset} — and is rejected here if it
      * does not (CORELIB_PLAN §5.1).
      *
-     * @param buffer caller-owned output buffer (length &gt; 0)
+     * @param buffer caller-owned output buffer
      * @param offset initial write position ({@code 0..buffer.length})
      * @param sink   flush sink, or {@code null} for none
-     * @throws IllegalArgumentException if the buffer is empty, the offset is out of
-     *                                  range, or a sink is given and the buffer
-     *                                  leaves less than {@link Sofab#MIN_OUTPUT_BUFFER}
-     *                                  usable bytes
+     * @throws IllegalArgumentException if the buffer is {@code null}, the offset is
+     *                                  out of range, or a sink is given and the
+     *                                  buffer leaves less than
+     *                                  {@link Sofab#MIN_OUTPUT_BUFFER} usable bytes
      */
     public OStream(byte[] buffer, int offset, FlushSink sink) {
         // The one moment an encoder allocates (CORELIB_PLAN §6.6): this object and
@@ -250,10 +250,18 @@ public final class OStream {
      * present. Without one no flush can occur, so §5.1 imposes no minimum: the
      * buffer either holds the message or reports {@link SofabError#BUFFER_FULL},
      * and a caller sizing from the generated {@code MAX_SIZE} keeps an exact fit.
+     *
+     * <p>"No minimum" includes <b>zero</b>, which is where the exact fit ends up:
+     * MESSAGE_SPEC §2 makes the all-default message the empty byte string, so a
+     * message with no fields has {@code MAX_SIZE == 0} and a caller sizing from it
+     * hands over an empty array. That is an installation with no room left rather
+     * than a broken one — writing into it is {@link SofabError#BUFFER_FULL} — and
+     * only the sink case below still rejects it, because a sink it could never
+     * flush through is the configuration §5.1 forbids.
      */
     private static void checkHandover(byte[] buffer, int offset, FlushSink sink) {
-        if (buffer == null || buffer.length == 0) {
-            throw new IllegalArgumentException("buffer must be non-empty");
+        if (buffer == null) {
+            throw new IllegalArgumentException("buffer must not be null");
         }
         if (offset < 0 || offset > buffer.length) {
             throw new IllegalArgumentException("offset out of range");
@@ -304,13 +312,14 @@ public final class OStream {
      * buffer plus a sink.
      *
      * @param size smallest buffer that will do, normally the generated
-     *             {@code MAX_SIZE}
+     *             {@code MAX_SIZE} — {@code 0} for a message with no fields, whose
+     *             encoding is the empty byte string
      * @return an encoder positioned at the start of this thread's scratch buffer
-     * @throws IllegalArgumentException if {@code size} is not positive
+     * @throws IllegalArgumentException if {@code size} is negative
      */
     public static OStream overScratch(int size) {
-        if (size < 1) {
-            throw new IllegalArgumentException("scratch buffer size must be positive");
+        if (size < 0) {
+            throw new IllegalArgumentException("scratch buffer size must not be negative");
         }
         byte[] buf = SCRATCH.get();
         if (buf == null || buf.length < size) {
@@ -384,11 +393,11 @@ public final class OStream {
      * storage the encoder could not write a single byte into (CORELIB_PLAN §5.1).
      * On a sink-less stream no minimum applies.
      *
-     * @param buffer new caller-owned output buffer (length &gt; 0)
+     * @param buffer new caller-owned output buffer
      * @param offset initial write position ({@code 0..buffer.length})
-     * @throws IllegalArgumentException if the buffer is empty, the offset is out of
-     *                                  range, or this stream carries a sink and the
-     *                                  buffer leaves less than
+     * @throws IllegalArgumentException if the buffer is {@code null}, the offset is
+     *                                  out of range, or this stream carries a sink
+     *                                  and the buffer leaves less than
      *                                  {@link Sofab#MIN_OUTPUT_BUFFER} usable bytes
      */
     public void bufferSet(byte[] buffer, int offset) {
@@ -424,7 +433,7 @@ public final class OStream {
      * {@link #nPending} is zero, which is cleared here. Everything else this class declares is restored, and
      * {@code ResetCoversEveryFieldTest} holds that to every field added later.
      *
-     * @param buffer caller-owned output buffer (length &gt; 0)
+     * @param buffer caller-owned output buffer
      */
     public void reset(byte[] buffer) {
         bufferSet(buffer, 0);
