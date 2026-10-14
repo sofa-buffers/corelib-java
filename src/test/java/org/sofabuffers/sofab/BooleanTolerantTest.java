@@ -450,11 +450,9 @@ class BooleanTolerantTest {
             DecodeStatus st = in.feed(data, sink);
             return fail("decode survived and answered " + st + "; want a rejection");
         } catch (SofabException e) {
+            // A refusal raised from a visitor callback too: feed unwraps its
+            // UncheckedIOException carrier (#129).
             return e.error();
-        } catch (UncheckedIOException e) {
-            // How a refusal raised from a visitor callback, which declares no checked
-            // exception, reaches the caller.
-            return ((SofabException) e.getCause()).error();
         }
     }
 

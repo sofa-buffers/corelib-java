@@ -39,7 +39,6 @@ import static org.sofabuffers.sofab.common.Decode.CHUNKS;
 import static org.sofabuffers.sofab.common.Wire.bytes;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -150,11 +149,6 @@ class LimitExceededIsTerminalTest {
         }
     }
 
-    /** The error a visitor-side rejection carries out of a callback. */
-    private static SofabError categoryOf(UncheckedIOException e) {
-        return ((SofabException) e.getCause()).error();
-    }
-
     /**
      * A fresh decoder fed the capped message in {@code chunk}-byte slices, up to
      * and including the LIMIT_EXCEEDED refusal that §6.2.1 says the cap must
@@ -162,9 +156,9 @@ class LimitExceededIsTerminalTest {
      */
     private static IStream refused(Capping v, int chunk) throws IOException {
         IStream in = new IStream();
-        UncheckedIOException e = assertThrows(UncheckedIOException.class,
+        SofabException e = assertThrows(SofabException.class,
                 () -> feedIn(in, message(), v, chunk), FINDING + ": the cap must refuse, chunk=" + chunk);
-        assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(e),
+        assertEquals(SofabError.LIMIT_EXCEEDED, e.error(),
                 FINDING + ": a receiver cap is LIMIT_EXCEEDED, never INVALID_MSG (§6.3), chunk=" + chunk);
         assertEquals(List.of(THE_ONLY_FIELD_SENT), v.events,
                 FINDING + ": the refusal happens at the length header, chunk=" + chunk);
@@ -191,11 +185,11 @@ class LimitExceededIsTerminalTest {
             // feed call. An empty feed adds no bytes and so puts exactly the old
             // question - "where do I stand?" - and a refused decode answers it with
             // the refusal rather than with COMPLETE or INCOMPLETE.
-            UncheckedIOException after = assertThrows(UncheckedIOException.class,
+            SofabException after = assertThrows(SofabException.class,
                     () -> in.feed(new byte[0], v),
                     FINDING + ": a refused message neither completed (§6.3, §5.2.1) nor may "
                             + "invite more bytes (§6.3, §5.2.3), chunk=" + chunk);
-            assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(after),
+            assertEquals(SofabError.LIMIT_EXCEEDED, after.error(),
                     FINDING + ": the refusal keeps its own code (§6.3), chunk=" + chunk);
         }
     }
@@ -215,11 +209,11 @@ class LimitExceededIsTerminalTest {
             Capping v = new Capping();
             IStream in = refused(v, chunk);
 
-            UncheckedIOException again = assertThrows(UncheckedIOException.class,
+            SofabException again = assertThrows(SofabException.class,
                     () -> in.feed(bytes(0x00, 0x2A), v),
                     FINDING + ": a feed after a policy refusal must be refused too (§6.3), chunk="
                             + chunk);
-            assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(again),
+            assertEquals(SofabError.LIMIT_EXCEEDED, again.error(),
                     FINDING + ": the repeat must keep the LimitExceeded code and must not be "
                             + "reported as InvalidMessage (§6.3), chunk=" + chunk);
             assertEquals(List.of(THE_ONLY_FIELD_SENT), v.events,
@@ -247,7 +241,7 @@ class LimitExceededIsTerminalTest {
 
             try {
                 in.feed(PAYLOAD, v);
-            } catch (UncheckedIOException | SofabException expected) {
+            } catch (SofabException expected) {
                 // A terminal decoder refuses the continuation; that is the point
                 // of case (b). What this case asserts is what reached the visitor.
             }
@@ -271,9 +265,9 @@ class LimitExceededIsTerminalTest {
         for (int chunk : CHUNKS) {
             Capping v = new Capping();
             IStream in = refused(v, chunk);
-            UncheckedIOException after = assertThrows(UncheckedIOException.class,
+            SofabException after = assertThrows(SofabException.class,
                     () -> in.feed(new byte[0], v));
-            verdicts.add(chunk + " -> " + categoryOf(after));
+            verdicts.add(chunk + " -> " + after.error());
         }
         assertEquals(1, verdicts.stream().map(s -> s.substring(s.indexOf("-> "))).distinct().count(),
                 FINDING + ": the two decode surfaces disagree after the same refusal: " + verdicts);

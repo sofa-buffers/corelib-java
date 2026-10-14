@@ -264,7 +264,7 @@ class Utf8StrictTest {
                 for (int chunk : new int[] {wire.length, 1}) {
                     IStream is = new IStream();
                     StrictStringSink sink = new StrictStringSink();
-                    assertThrows(UncheckedIOException.class, () -> {
+                    assertThrows(SofabException.class, () -> {
                         for (int i = 0; i < wire.length; i += chunk) {
                             is.feed(wire, i, Math.min(chunk, wire.length - i), sink);
                         }

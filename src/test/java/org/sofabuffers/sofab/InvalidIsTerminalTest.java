@@ -238,7 +238,8 @@ class InvalidIsTerminalTest {
      * is explicitly NOT the INVALID outcome, so it must not latch one. It is
      * terminal all the same and latches under its own code — that half belongs to
      * {@link LimitExceededIsTerminalTest}. Generated code raises it from a visitor
-     * callback, wrapped because {@link Visitor} declares no checked exception.
+     * callback, wrapped because {@link Visitor} declares no checked exception,
+     * and {@code feed} unwraps it back into the {@link SofabException} it declares.
      */
     @Test
     void aLimitExceededFromTheVisitorDoesNotLatchInvalid() {
@@ -250,14 +251,14 @@ class InvalidIsTerminalTest {
             }
         };
 
-        UncheckedIOException e = assertThrows(UncheckedIOException.class,
+        SofabException e = assertThrows(SofabException.class,
                 () -> is.feed(bytes(0x00, 0x2A), limiter));
-        assertEquals(SofabError.LIMIT_EXCEEDED, ((SofabException) e.getCause()).error());
+        assertEquals(SofabError.LIMIT_EXCEEDED, e.error());
         // Latched, but under its own code: the repeat rejection is still
         // LIMIT_EXCEEDED, never folded into INVALID_MSG (§6.3).
-        UncheckedIOException again = assertThrows(UncheckedIOException.class,
+        SofabException again = assertThrows(SofabException.class,
                 () -> is.feed(bytes(0x00, 0x2A), limiter));
-        assertEquals(SofabError.LIMIT_EXCEEDED, ((SofabException) again.getCause()).error(),
+        assertEquals(SofabError.LIMIT_EXCEEDED, again.error(),
                 "a policy limit is not INVALID");
     }
 
@@ -309,9 +310,9 @@ class InvalidIsTerminalTest {
             }
         };
 
-        UncheckedIOException e = assertThrows(UncheckedIOException.class,
+        SofabException e = assertThrows(SofabException.class,
                 () -> is.feed(bytes(0x00, 0x2A), unbounded));
-        assertEquals(SofabError.ARGUMENT, ((SofabException) e.getCause()).error());
+        assertEquals(SofabError.ARGUMENT, e.error());
 
         // Nothing latched: the next feed decodes and answers for itself.
         RecordingVisitor v = new RecordingVisitor();
@@ -339,8 +340,11 @@ class InvalidIsTerminalTest {
         };
 
         // string field id 0, declared length 3 - over the visitor's schema bound.
-        assertThrows(UncheckedIOException.class,
+        // Reported as the SofabException feed declares, not as the carrier the
+        // visitor threw it through (#129).
+        SofabException e = assertThrows(SofabException.class,
                 () -> is.feed(bytes(0x02, 0x1A, 0x61, 0x62, 0x63), bound));
+        assertEquals(SofabError.INVALID_MSG, e.error());
 
         assertLatchedInvalid(is);
         assertRejects(is, bound, bytes(0x00, 0x2A));

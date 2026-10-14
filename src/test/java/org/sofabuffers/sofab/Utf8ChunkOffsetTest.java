@@ -170,10 +170,10 @@ class Utf8ChunkOffsetTest {
                 // decoder's window without copying it.
                 IStream is = new IStream();
                 ZeroCopyStrictStrings sink = new ZeroCopyStrictStrings();
-                UncheckedIOException e = assertThrows(UncheckedIOException.class,
+                SofabException e = assertThrows(SofabException.class,
                         () -> is.feed(wire, sink),
                         name + ": an invalid string must be rejected wherever it sits");
-                assertEquals(SofabError.INVALID_MSG, ((SofabException) e.getCause()).error());
+                assertEquals(SofabError.INVALID_MSG, e.error());
                 assertRejectsAgain(is, name + ": the rejection is terminal");
                 assertTrue(sink.sawFieldPastItsOwnLength(),
                         name + ": this case only closes the gap if chunkOffset >= total");
@@ -183,7 +183,7 @@ class Utf8ChunkOffsetTest {
                 // so the same bytes go through the accumulating leg instead.
                 IStream chunked = new IStream();
                 ZeroCopyStrictStrings chunkedSink = new ZeroCopyStrictStrings();
-                assertThrows(UncheckedIOException.class, () -> {
+                assertThrows(SofabException.class, () -> {
                     for (byte b : wire) {
                         chunked.feed(new byte[] {b}, chunkedSink);
                     }
@@ -286,9 +286,9 @@ class Utf8ChunkOffsetTest {
                 "well-formed bytes so far - the verdict cannot be INVALID yet");
         assertEquals(List.of(), sink.strings);
 
-        UncheckedIOException e = assertThrows(UncheckedIOException.class,
+        SofabException e = assertThrows(SofabException.class,
                 () -> is.feed(wire, wire.length - 2, 2, sink));
-        assertEquals(SofabError.INVALID_MSG, ((SofabException) e.getCause()).error());
+        assertEquals(SofabError.INVALID_MSG, e.error());
         assertRejectsAgain(is, "an invalid payload is terminal");
     }
 
