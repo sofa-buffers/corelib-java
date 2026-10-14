@@ -279,13 +279,13 @@ class SequenceGrowthTest {
         GrowthDest dest = new GrowthDest(structElements);
         IStream in = new IStream();
 
-        UncheckedIOException caught = null;
+        SofabException caught = null;
         try {
             in.feed(message, dest);
-        } catch (UncheckedIOException e) {
+        } catch (SofabException e) {
             caught = e;
         }
-        final UncheckedIOException thrown = caught;
+        final SofabException thrown = caught;
 
         JsonObject expect = c.getAsJsonObject("expect");
         String outcome = expect.get("outcome").getAsString();
@@ -316,8 +316,7 @@ class SequenceGrowthTest {
             if (thrown == null) {
                 fail("decode completed; want a LIMIT_EXCEEDED rejection");
             }
-            assertTrue(thrown.getCause() instanceof SofabException, "cause is a SofabException");
-            assertEquals(SofabError.LIMIT_EXCEEDED, ((SofabException) thrown.getCause()).error());
+            assertEquals(SofabError.LIMIT_EXCEEDED, thrown.error());
 
             // The bound is applied BEFORE the container is extended, so the length
             // never passes what legitimately arrived — and the rejection is terminal,
@@ -333,10 +332,9 @@ class SequenceGrowthTest {
                 // gets the refusal back rather than an outcome, so it never answers
                 // COMPLETE, and never under the wire-conformance code either: §6.3
                 // forbids folding a policy rejection into InvalidMessage.
-                UncheckedIOException again = assertThrows(UncheckedIOException.class,
+                SofabException again = assertThrows(SofabException.class,
                         () -> in.feed(new byte[0], dest), "the refusal is terminal");
-                assertEquals(SofabError.LIMIT_EXCEEDED,
-                        ((SofabException) again.getCause()).error(),
+                assertEquals(SofabError.LIMIT_EXCEEDED, again.error(),
                         "the repeat is not INVALID_MSG");
             }
         }

@@ -373,12 +373,20 @@ public final class IStream {
      * nothing further and rethrows {@code INVALID_MSG} for every subsequent call
      * until {@link #reset()} begins a new message.
      * {@link SofabError#LIMIT_EXCEEDED} — a receiver-cap refusal of well-formed
-     * bytes (§6.2.1) — is terminal too (§6.3) and behaves the same way, rethrown in
-     * the carrier it arrived in and under its own code, never folded into
-     * {@code INVALID_MSG}. So is {@link SofabError#ARGUMENT}, raised where a
-     * {@link Visitor#arrayBulk} destination is too short for the count it was
-     * offered (§6.6.3). Running out of bytes mid-field is <em>not</em> any of that:
+     * bytes (§6.2.1) — is terminal too (§6.3) and behaves the same way, rethrown
+     * under its own code, never folded into {@code INVALID_MSG}. So is
+     * {@link SofabError#ARGUMENT}, raised where a {@link Visitor#arrayBulk}
+     * destination is too short for the count it was offered (§6.6.3). Running out of bytes mid-field is <em>not</em> any of that:
      * it suspends and resumes on the next call, as before.
+     *
+     * <p><b>Every rejection arrives as the checked {@link SofabException}</b>,
+     * including one raised by generated code inside the {@link Visitor}. A visitor
+     * method cannot throw a checked exception, so that code reports it wrapped in
+     * an {@link UncheckedIOException} ({@link Sofab#invalid},
+     * {@link Sofab#limitExceeded}, {@link Sofab#argument}); this method is the
+     * public boundary and unwraps it.
+     * Only a visitor's own I/O failure — an {@code UncheckedIOException} whose
+     * cause is not a {@code SofabException} — passes through as thrown.
      *
      * @param data    backing array
      * @param off     start offset
@@ -389,18 +397,16 @@ public final class IStream {
      *         {@link DecodeStatus#INCOMPLETE}
      * @throws SofabException with {@link SofabError#INVALID_MSG} on malformed input,
      *         or on any call after malformed input was already rejected; with
+     *         {@link SofabError#LIMIT_EXCEEDED} where a receiver limit refuses this
+     *         message, and on every call after that; with
      *         {@link SofabError#ARGUMENT} where a bulk destination is too short for
      *         the count it was offered, and on every call after that
-     * @throws java.io.UncheckedIOException wrapping a {@code LIMIT_EXCEEDED}
-     *         {@link SofabException} where a receiver limit refuses this message,
-     *         and on every call after that
      */
     public DecodeStatus feed(byte[] data, int off, int len, Visitor visitor) throws SofabException {
         if (terminal == SofabError.LIMIT_EXCEEDED) {
-            // Repeated in the carrier it was raised through, so the caller's
-            // existing catch still sees it, and still under its own code: §6.3
-            // MUST NOT report a receiver-limit rejection as InvalidMessage.
-            throw Sofab.limitExceeded(
+            // Repeated under its own code: §6.3 MUST NOT report a receiver-limit
+            // rejection as InvalidMessage.
+            throw new SofabException(SofabError.LIMIT_EXCEEDED,
                     "decode already refused by a receiver limit; reset() to start a new message");
         }
         if (terminal == SofabError.ARGUMENT) {
@@ -432,9 +438,16 @@ public final class IStream {
             // by wrapping a SofabException, and refuses a receiver cap (§6.2.1) the
             // same way. Both end the decode, so both latch here, each keeping its
             // own code: §6.3 makes the policy rejection terminal too and forbids
-            // reporting it as InvalidMessage.
-            if (e.getCause() instanceof SofabException cause && isTerminal(cause.error())) {
-                terminal = cause.error();
+            // reporting it as InvalidMessage. The wrapper is only how the
+            // rejection crossed the Visitor interface; past this boundary it
+            // leaves as the SofabException this method declares (#129). A cause
+            // that is not one — the visitor's own I/O failure — is not ours to
+            // reinterpret and passes through as thrown.
+            if (e.getCause() instanceof SofabException cause) {
+                if (isTerminal(cause.error())) {
+                    terminal = cause.error();
+                }
+                throw cause;
             }
             throw e;
         }

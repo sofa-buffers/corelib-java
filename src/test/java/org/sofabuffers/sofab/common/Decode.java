@@ -7,7 +7,6 @@ package org.sofabuffers.sofab.common;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import java.io.UncheckedIOException;
 import java.util.List;
 
 import org.sofabuffers.sofab.DecodeStatus;
@@ -77,11 +76,10 @@ public final class Decode {
                 }
             }
         } catch (SofabException e) {
+            // Every rejection, including one a visitor callback raised through
+            // the UncheckedIOException carrier: feed unwraps it (#129), so a
+            // carrier escaping here is a regression and is left to fail the test.
             return "R:" + e.error();
-        } catch (UncheckedIOException e) {
-            // How sofabgen's Java backend aborts from a visitor callback, whose
-            // signature declares no checked exception.
-            return "R:" + ((SofabException) e.getCause()).error();
         }
         return st == DecodeStatus.COMPLETE ? "A" : "I";
     }

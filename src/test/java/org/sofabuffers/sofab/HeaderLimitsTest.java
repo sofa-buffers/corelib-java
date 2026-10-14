@@ -599,17 +599,13 @@ class HeaderLimitsTest {
     }
 
     /**
-     * The rejection's category, whichever carrier it arrived on. A refusal raised
-     * inside the decoder is a bare {@link SofabException}; one raised from a visitor
-     * callback — which declares no checked exception — is wrapped in an
-     * {@link UncheckedIOException}, and the re-raise a terminal verdict produces may
-     * use either.
+     * The rejection's category. Every refusal reaches the caller as a bare
+     * {@link SofabException}, including one raised from a visitor callback, which
+     * {@code feed} unwraps from its {@link java.io.UncheckedIOException} carrier
+     * (#129); anything else is not a sofab rejection.
      */
     private static SofabError categoryOf(Throwable t) {
         if (t instanceof SofabException e) {
-            return e.error();
-        }
-        if (t instanceof UncheckedIOException u && u.getCause() instanceof SofabException e) {
             return e.error();
         }
         throw new AssertionError("not a sofab rejection: " + t, t);

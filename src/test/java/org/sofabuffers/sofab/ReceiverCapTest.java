@@ -473,14 +473,14 @@ class ReceiverCapTest {
     void aCapBreachIsNotTheInvalidOutcome() throws IOException {
         IStream in = new IStream();
         byte[] msg = oneString(64);
-        UncheckedIOException e = assertThrows(UncheckedIOException.class,
+        SofabException e = assertThrows(SofabException.class,
                 () -> in.feed(msg, new CappedVisitor(CAP)));
-        assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(e));
+        assertEquals(SofabError.LIMIT_EXCEEDED, e.error());
         // The latched verdict keeps that code too: asking again (an empty feed adds
         // no bytes) repeats LIMIT_EXCEEDED and never INVALID_MSG.
-        UncheckedIOException again = assertThrows(UncheckedIOException.class,
+        SofabException again = assertThrows(SofabException.class,
                 () -> in.feed(new byte[0], new CappedVisitor(CAP)));
-        assertEquals(SofabError.LIMIT_EXCEEDED, categoryOf(again),
+        assertEquals(SofabError.LIMIT_EXCEEDED, again.error(),
                 "well-formed bytes this receiver declines are not malformed bytes");
     }
 

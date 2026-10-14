@@ -104,6 +104,12 @@ public final class Sofab {
      * well-formed bytes (§6.2.1) — is deliberately not this: it travels through
      * {@link #limitExceeded(String)} instead, and is latched under its own code.
      *
+     * <p>The wrapper only carries the rejection across the {@link Visitor}
+     * interface: {@link IStream#feed} unwraps it, so the decode's caller catches
+     * the {@link SofabException} {@code feed} declares, as it does for the
+     * decoder's own rejections. The same holds for {@link #limitExceeded} and
+     * {@link #argument}.
+     *
      * @param detail human-readable context, naming the field and the bound it broke
      * @return the exception to throw
      */

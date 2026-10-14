@@ -63,10 +63,10 @@ class SofabTest {
             }
         };
 
-        UncheckedIOException e =
-                assertThrows(UncheckedIOException.class, () -> in.feed(message, v));
-        SofabException cause = assertInstanceOf(SofabException.class, e.getCause());
-        assertEquals(SofabError.INVALID_MSG, cause.error());
+        // Unwrapped at the boundary: the caller catches the SofabException feed
+        // declares, not the carrier the visitor threw it through (#129).
+        SofabException e = assertThrows(SofabException.class, () -> in.feed(message, v));
+        assertEquals(SofabError.INVALID_MSG, e.error());
         // Latched: the decoder decodes nothing further and repeats the verdict,
         // which is the only place there is to read it.
         SofabException again = assertThrows(SofabException.class,
