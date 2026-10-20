@@ -12,9 +12,33 @@
        is what Maven admits) plus artifactId corelib. The normative half is the
        namespace, and every symbol is under org.sofabuffers.sofab. -->
   <artifactId>corelib</artifactId>
-  <!-- 0.13.0: source-breaking, in four places. Sofab.API_VERSION is the WIRE
-       contract and stays 1 through all of them: the bytes are unchanged.
+  <!-- 0.14.0: source-breaking, and behaviour-changing in one place. Sofab.API_VERSION
+       is the WIRE contract and stays 1: the bytes are unchanged.
 
+       (a) IStream.feed unwraps a rejection a Visitor raised through the
+       UncheckedIOException carrier (Sofab.invalid / limitExceeded / argument) and
+       throws the SofabException it declares, for every code (#129). Generated code
+       rejects schema bounds and receiver caps from inside the visitor, so a caller
+       catching what feed's signature promised never caught them; LIMIT_EXCEEDED in
+       particular was documented as arriving wrapped. Callers that caught
+       UncheckedIOException around feed and read getCause() catch SofabException
+       instead. A visitor's own I/O failure (a cause that is not a SofabException)
+       still passes through as thrown, and inside a callback the carriers are
+       unchanged.
+
+       (b) A zero-length output buffer is legal. OStream's constructors, bufferSet(),
+       reset() and overScratch(0) no longer refuse it with ARGUMENT; only a null
+       array is refused. MESSAGE_SPEC §2 makes the all-default message the empty
+       byte string, so a message with no fields has MAX_SIZE == 0 and the generated
+       one-shot encode() must be able to ask for it (generator#738). A sink still
+       rejects an empty buffer through the MIN_OUTPUT_BUFFER check (§5.1).
+
+       Added, not breaking: OStream.writeString(id, text, maxlen) refuses a string
+       whose UTF-8 encoding is longer than the caller's bound with ARGUMENT before
+       any byte of the field is written (generator#656). The library holds no bound
+       of its own; the two-argument writeString is unchanged and stays unbounded.
+
+       (0.13.0: source-breaking, in three places.
        (a) IStream.feed now RETURNS the decode outcome —
        DecodeStatus.COMPLETE or INCOMPLETE for the bytes consumed so far — on both
        overloads, and the separate IStream.status() accessor is gone. One fact had
@@ -47,18 +71,7 @@
        the one case with no second number to compare — a string/blob whose maxlen
        the caller already enforced at the length word, where PayloadAcc has nothing
        to hold it to.
-
-       (d) IStream.feed unwraps a rejection a Visitor raised through the
-       UncheckedIOException carrier (Sofab.invalid / limitExceeded / argument) and
-       throws the SofabException it declares, for every code (#129). Generated code
-       rejects schema bounds and receiver caps from inside the visitor, so a caller
-       catching what feed's signature promised never caught them; LIMIT_EXCEEDED in
-       particular was documented as arriving wrapped. Callers that caught
-       UncheckedIOException around feed and read getCause() catch SofabException
-       instead. A visitor's own I/O failure (a cause that is not a SofabException)
-       still passes through as thrown, and inside a callback the carriers are
-       unchanged.
-       (0.12.0: source-breaking. The three §6.2.1 receiver caps became arguments on
+       0.12.0: source-breaking. The three §6.2.1 receiver caps became arguments on
        the calls generated code already makes — PayloadAcc.string/blob take the cap
        on the announced length, Seq.reserveRow* the cap on the row index — so every
        one of those call sites gained a parameter. The library still holds no limit
@@ -73,7 +86,7 @@
        Sofab.API_VERSION stayed 1 in both. 0.9.0 removed writeSequenceBegin in
        favour of the writeSequenceBeginLazy / writeSequenceEnd /
        writeSequenceEndKeep trio.) -->
-  <version>0.13.0</version>
+  <version>0.14.0</version>
   <packaging>jar</packaging>
 
   <name>SofaBuffers CoreLib (Java)</name>
